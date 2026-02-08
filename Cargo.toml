@@ -1,0 +1,32 @@
+[package]
+name = "neatify"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rhai = "1.17"
+tree-sitter = "0.26.5"
+clap = { version = "4.5", features = ["derive"] }
+md5 = "0.7"
+regex = "1.10"
+toml = "0.8"
+libloading = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+indexmap = "=2.2.6"
+serde_json = "1.0"
+sha2 = "0.10"
+hex = "0.4"
+ureq = "2.7.1"
+url = "=2.4.1"
+uuid = { version = "1.7", features = ["v4"] }
+tower-lsp = "0.20"
+tokio = { version = "1.37", features = ["io-std", "macros", "rt-multi-thread", "sync"] }
+ignore = "0.4"
+globset = "0.4"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "z"
+panic = "abort"
+strip = "symbols"
