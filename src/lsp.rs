@@ -37,7 +37,9 @@ pub fn run_lsp(
 		.ok_or_else(|| format!("formatter script not found: {}", spec.formatter))?;
 	let binary_path = resolve_treesitter_binary(&spec.treesitter.binary, &roots)?;
 	let marker = spec.fragment_marker.clone();
-	let language = spec.treesitter.language.clone();
+	let language = spec.treesitter
+		.language
+		.clone();
 	let backend = move |client: Client| Backend::new(
 		client,
 		entry_path.clone(),
@@ -101,8 +103,12 @@ impl Backend {
 		}
 	}
 	fn get_text(&self, uri: &str) -> Result<String, LspError> {
-		let docs = self.documents.lock().map_err(|_| LspError::internal_error())?;
-		docs.get(uri).cloned().ok_or_else(|| LspError::invalid_params("document not open"))
+		let docs = self.documents
+			.lock()
+			.map_err(|_| LspError::internal_error())?;
+		docs.get(uri)
+			.cloned()
+			.ok_or_else(|| LspError::invalid_params("document not open"))
 	}
 	fn format_full(&self, source: &str) -> Result<String, LspError> {
 		format_source(
@@ -120,7 +126,9 @@ impl Backend {
 			.map_err(|_| LspError::internal_error())
 	}
 	fn format_range(&self, source: &str, range: &RangeSpec) -> Result<String, LspError> {
-		let marker = self.fragment_marker.as_ref().ok_or_else(|| LspError::internal_error())?;
+		let marker = self.fragment_marker
+			.as_ref()
+			.ok_or_else(|| LspError::internal_error())?;
 		let offsets = range_offsets(source, range).map_err(|msg| LspError::invalid_params(msg))?;
 		format_fragment(
 			source,
@@ -166,7 +174,9 @@ impl LanguageServer for Backend {
 		Ok(())
 	}
 	async fn did_open(&self, params: tower_lsp::lsp_types::DidOpenTextDocumentParams) {
-		let uri = params.text_document.uri.to_string();
+		let uri = params.text_document
+			.uri
+			.to_string();
 		let mut docs = match self.documents.lock() {
 			Ok(docs) => docs,
 			Err(err) => err.into_inner(),
@@ -176,17 +186,23 @@ impl LanguageServer for Backend {
 	async fn did_change(
 		&self,
 		params: tower_lsp::lsp_types::DidChangeTextDocumentParams) {
-		let uri = params.text_document.uri.to_string();
+		let uri = params.text_document
+			.uri
+			.to_string();
 		let mut docs = match self.documents.lock() {
 			Ok(docs) => docs,
 			Err(err) => err.into_inner(),
 		};
-		if let Some(change) = params.content_changes.into_iter().last() {
+		if let Some(change) = params.content_changes
+			.into_iter()
+			.last() {
 			docs.insert(uri, change.text);
 		}
 	}
 	async fn did_close(&self, params: tower_lsp::lsp_types::DidCloseTextDocumentParams) {
-		let uri = params.text_document.uri.to_string();
+		let uri = params.text_document
+			.uri
+			.to_string();
 		let mut docs = match self.documents.lock() {
 			Ok(docs) => docs,
 			Err(err) => err.into_inner(),
@@ -196,7 +212,9 @@ impl LanguageServer for Backend {
 	async fn formatting(
 		&self,
 		params: tower_lsp::lsp_types::DocumentFormattingParams) -> LspResult<Option<Vec<TextEdit>>> {
-		let uri = params.text_document.uri.to_string();
+		let uri = params.text_document
+			.uri
+			.to_string();
 		let text = self.get_text(&uri)?;
 		let formatted = self.format_full(&text)?;
 		if formatted == text {
@@ -215,7 +233,9 @@ impl LanguageServer for Backend {
 	async fn range_formatting(
 		&self,
 		params: tower_lsp::lsp_types::DocumentRangeFormattingParams) -> LspResult<Option<Vec<TextEdit>>> {
-		let uri = params.text_document.uri.to_string();
+		let uri = params.text_document
+			.uri
+			.to_string();
 		let text = self.get_text(&uri)?;
 		let range = params.range;
 		let range_spec = range_to_spec(&range)?;
@@ -232,8 +252,7 @@ impl LanguageServer for Backend {
 }
 
 fn range_to_spec(range: &Range) -> Result<RangeSpec, LspError> {
-	let start_row = usize::try_from(range.start.line)
-		.map_err(|_| LspError::invalid_params("range start line overflow"))?;
+	let start_row = usize::try_from(range.start.line).map_err(|_| LspError::invalid_params("range start line overflow"))?;
 	let start_col = usize::try_from(range.start.character)
 		.map_err(|_| LspError::invalid_params("range start column overflow"))?;
 	let end_row = usize::try_from(range.end.line).map_err(|_| LspError::invalid_params("range end line overflow"))?;

@@ -123,7 +123,9 @@ fn int_to_usize(value: INT, label: &str) -> RhaiResult<usize> {
 }
 
 fn matches_to_array(matches: Vec<Match>) -> Array {
-	matches.into_iter().map(Dynamic::from).collect()
+	matches.into_iter()
+		.map(Dynamic::from)
+		.collect()
 }
 
 fn doc_from_string(ctx: &Context, text: &str) -> usize {
@@ -242,8 +244,118 @@ fn extract_node_types(query: &str) -> Vec<String> {
 	out
 }
 
+fn parse_simple_kind_query(query: &str) -> Option<String> {
+	let bytes = query.as_bytes();
+	let mut i = 0;
+	while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+		i += 1;
+	}
+	if i >= bytes.len() || bytes[i] != b'(' {
+		return None;
+	}
+	i += 1;
+	while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+		i += 1;
+	}
+	if i >= bytes.len() {
+		return None;
+	}
+	let start = i;
+	while i < bytes.len() {
+		let c = bytes[i] as char;
+		if c.is_ascii_alphanumeric() || c == '_' {
+			i += 1;
+			continue;
+		}
+		break;
+	}
+	if i == start {
+		return None;
+	}
+	let name = &query[start..i];
+	if name == "_" {
+		return None;
+	}
+	while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+		i += 1;
+	}
+	if i >= bytes.len() || bytes[i] != b')' {
+		return None;
+	}
+	i += 1;
+	while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+		i += 1;
+	}
+	if i < bytes.len() {
+		if bytes[i] != b'@' {
+			return None;
+		}
+		i += 1;
+		let cap_start = i;
+		while i < bytes.len() {
+			let c = bytes[i] as char;
+			if c.is_ascii_alphanumeric() || c == '_' {
+				i += 1;
+				continue;
+			}
+			break;
+		}
+		if i == cap_start {
+			return None;
+		}
+		while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+			i += 1;
+		}
+		if i < bytes.len() {
+			return None;
+		}
+	}
+	Some(name.to_string())
+}
+
+fn simple_kind_ids(
+	ctx: &Context,
+	language: &str,
+	lang: &tree_sitter::Language,
+	queries: &[String]) -> Option<HashSet<u16>> {
+	let mut kind_ids: HashSet<u16> = HashSet::new();
+	for query in queries.iter() {
+		let Some(name) = parse_simple_kind_query(query) else {
+			return None;
+		};
+		let canonical = lang.id_for_node_kind(&name, true);
+		if lang.node_kind_is_supertype(canonical) {
+			return None;
+		}
+		let ids = ctx.named_kind_ids(language, &name).unwrap_or_else(|| vec![canonical]);
+		for id in ids {
+			kind_ids.insert(id);
+		}
+	}
+	if kind_ids.is_empty() {
+		None
+	}
+	else {
+		Some(kind_ids)
+	}
+}
+
 fn node_kind_tokens(name: &str) -> Vec<&str> {
-	name.split('_').filter(|t| !t.is_empty()).collect()
+	name.split('_')
+		.filter(|t| !t.is_empty())
+		.collect()
+}
+
+fn gray_text(text: &str) -> String {
+	if std::env::var("NO_COLOR").is_ok() {
+		return text.to_string();
+	}
+	if let Ok(term) = std::env::var("TERM") {
+		if term == "dumb" {
+			return text.to_string();
+		}
+	}
+	format!("\x1b[90m{text}\x1b[0m")
 }
 
 fn validate_queries(
@@ -256,7 +368,10 @@ fn validate_queries(
 	for id in 0..count {
 		if let Some(name) = lang.node_kind_for_id(id as u16) {
 			kinds.insert(name.to_string());
-			let tokens = node_kind_tokens(name).into_iter().map(|t| t.to_string()).collect::<Vec<_>>();
+			let tokens = node_kind_tokens(name)
+				.into_iter()
+				.map(|t| t.to_string())
+				.collect::<Vec<_>>();
 			kind_tokens.push((name.to_string(), tokens));
 		}
 	}
@@ -272,7 +387,10 @@ fn validate_queries(
 			if kinds.contains(&name) {
 				continue;
 			}
-			let want_tokens = node_kind_tokens(&name).into_iter().map(|t| t.to_string()).collect::<Vec<_>>();
+			let want_tokens = node_kind_tokens(&name)
+				.into_iter()
+				.map(|t| t.to_string())
+				.collect::<Vec<_>>();
 			let mut scored: Vec<(i64, String)> = Vec::new();
 			for (kind, tokens) in kind_tokens.iter() {
 				let mut score = 0;
@@ -314,6 +432,735 @@ fn validate_queries(
 		}
 	}
 	(valid, invalid)
+}
+
+fn capture_kind_counts_sorted(
+	counts: &HashMap<u16, i64>,
+	lang: &tree_sitter::Language) -> Vec<(u16, String, i64)> {
+	let mut items: Vec<(u16, String, i64)> = counts.iter()
+		.map(
+			|(id, count)| {
+				let name = lang.node_kind_for_id(*id).unwrap_or("unknown");
+				(*id, name.to_string(), *count)
+			})
+		.collect();
+	items.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.1.cmp(&b.1)));
+	items
+}
+
+fn walk_impl(
+	ctx_walk: &Context,
+	ctx_call: NativeCallContext,
+	language: &str,
+	queries: Array,
+	rule: FnPtr,
+	rewrite: bool) -> RhaiResult<INT> {
+	let mut query_list = Vec::new();
+	let mut kind_id_list: Vec<u16> = Vec::new();
+	let mut has_strings = false;
+	let mut has_ints = false;
+	for item in queries {
+		if item.is::<INT>() {
+			if has_strings {
+				return Err("walk list expects all strings or all ints".into());
+			}
+			has_ints = true;
+			let value = item.as_int().unwrap_or(0);
+			let value = int_to_usize(value, "kind_id")?;
+			if value > u16::MAX as usize {
+				return Err("walk kind_id exceeds u16".into());
+			}
+			kind_id_list.push(value as u16);
+		}
+		else if item.is::<ImmutableString>() || item.is::<String>() {
+			if has_ints {
+				return Err("walk list expects all strings or all ints".into());
+			}
+			has_strings = true;
+			let q = item.into_string().map_err(|_| "walk query list expects strings")?;
+			if !q.trim().is_empty() {
+				query_list.push(q);
+			}
+		}
+		else {
+			return Err("walk list expects strings or ints".into());
+		}
+	}
+	if has_strings && query_list.is_empty() {
+		return Ok(0);
+	}
+	if has_ints && kind_id_list.is_empty() {
+		return Ok(0);
+	}
+	let Some(lang) = ctx_walk.language_for(language) else {
+		return Ok(0);
+	};
+	let Some(tree) = ctx_walk.tree_for(language) else {
+		return Ok(0);
+	};
+	let source_bytes = ctx_walk.source_bytes();
+	let root = tree.root_node();
+	let profile_enabled = ctx_walk.profile_enabled();
+	let mut query_ms: i64 = 0;
+	let mut match_count: i64 = 0;
+	let mut capture_count: i64 = 0;
+	let mut invalid_queries: i64 = 0;
+	let mut used_combined = false;
+	let mut node_ref_ns: u128 = 0;
+	let mut node_ref_calls: i64 = 0;
+	let mut kind_id_set: Option<HashSet<u16>> = if has_ints {
+		let mut expanded: HashSet<u16> = HashSet::new();
+		for id in kind_id_list.iter().copied() {
+			if let Some(name) = lang.node_kind_for_id(id) {
+				if lang.node_kind_is_named(id) {
+					if let Some(ids) = ctx_walk.named_kind_ids(language, name) {
+						for entry in ids {
+							expanded.insert(entry);
+						}
+						continue;
+					}
+				}
+			}
+			expanded.insert(id);
+		}
+		Some(expanded)
+	}
+	else {
+		None
+	};
+	let mut rewrite_used = false;
+	if has_strings {
+		let (validated, invalid) = validate_queries(language, &lang, &query_list);
+		query_list = validated;
+		if !invalid.is_empty() {
+			invalid_queries = invalid.len() as i64;
+		}
+		if query_list.is_empty() {
+			return Ok(0);
+		}
+		if rewrite && kind_id_set.is_none() && !ctx_walk.test_group_enabled() {
+			if let Some(kind_ids) = simple_kind_ids(ctx_walk, language, &lang, &query_list) {
+				kind_id_set = Some(kind_ids);
+				rewrite_used = true;
+			}
+		}
+	}
+	if let Some(kind_ids) = kind_id_set {
+		if let Some(nodes) = ctx_walk.precache_postorder(language) {
+			if nodes.is_empty() {
+				return Ok(0);
+			}
+			let mut capture_kind_counts: Option<HashMap<u16, i64>> = if profile_enabled {
+				Some(HashMap::new())
+			}
+			else {
+				None
+			};
+			let rewrite_kind_names: Option<Vec<(String, Vec<u16>)>> = if profile_enabled && rewrite_used {
+				let mut seen = HashSet::new();
+				let mut names: Vec<(String, Vec<u16>)> = Vec::new();
+				for query in query_list.iter() {
+					let Some(name) = parse_simple_kind_query(query) else {
+						continue;
+					};
+					if !seen.insert(name.clone()) {
+						continue;
+					}
+					let ids = ctx_walk.named_kind_ids(language, &name).unwrap_or_else(|| vec![lang.id_for_node_kind(&name, true)]);
+					names.push((name, ids));
+				}
+				names.sort_by(|a, b| a.0.cmp(&b.0));
+				Some(names)
+			}
+			else {
+				None
+			};
+			let mut captured: HashSet<NodeKey> = HashSet::new();
+			let mut marked: HashSet<NodeKey> = HashSet::new();
+			for node_ref in nodes.iter() {
+				if kind_ids.contains(&node_ref.native_kind_id()) {
+					let key = NodeKey::from_node(node_ref);
+					captured.insert(key.clone());
+					if let Some(counts) = capture_kind_counts.as_mut() {
+						let entry = counts.entry(node_ref.native_kind_id()).or_insert(0);
+						*entry += 1;
+					}
+					let mut current = Some(node_ref.clone());
+					while let Some(node) = current {
+						marked.insert(NodeKey::from_node(&node));
+						current = node.parent();
+					}
+				}
+			}
+			if let Some(root_ref) = nodes.last() {
+				marked.insert(NodeKey::from_node(root_ref));
+			}
+			let traverse_start = Instant::now();
+			let traverse_ms = traverse_start.elapsed().as_millis() as i64;
+			let build_start = Instant::now();
+			let mut rule_calls: i64 = 0;
+			let mut children_total: i64 = 0;
+			let mut root_doc_id: INT = 0;
+			capture_count = captured.len() as i64;
+			let root_key = nodes.last().map(|node| NodeKey::from_node(node.as_ref()));
+			for node_ref in nodes.iter() {
+				let key = NodeKey::from_node(node_ref);
+				if !marked.contains(&key) {
+					continue;
+				}
+				let doc_id: INT = if captured.contains(&key) {
+					rule_calls += 1;
+					let captured_children = node_ref.children();
+					if !captured_children.is_empty() {
+						children_total += captured_children.len() as i64;
+					}
+					if (node_ref.is_error() || node_ref.is_missing()) && ctx_walk.debug_enabled() {
+						let kind_name = lang.node_kind_for_id(node_ref.kind_id()).unwrap_or("unknown");
+						let range = node_ref.byte_range();
+						eprintln!(
+							"[neatify] error node in {language} at {}..{} ({kind_name})",
+							range.start, range.end
+						);
+						ctx_walk.doc_range(range.start, range.end) as INT
+					}
+					else {
+						rule.call_within_context(&ctx_call, (node_ref.clone(), node_ref.clone()))
+							.map_err(Box::<EvalAltResult>::from)?
+					}
+				}
+				else {
+					if (node_ref.is_error() || node_ref.is_missing()) && ctx_walk.debug_enabled() {
+						let kind_name = lang.node_kind_for_id(node_ref.kind_id()).unwrap_or("unknown");
+						let range = node_ref.byte_range();
+						eprintln!(
+							"[neatify] error node in {language} at {}..{} ({kind_name})",
+							range.start, range.end
+						);
+					}
+					let mut child_docs: Vec<usize> = Vec::new();
+					let mut has_doc = false;
+					let range = node_ref.byte_range();
+					let mut prev_end = range.start;
+					let children = node_ref.children();
+					if !children.is_empty() {
+						for child_ref in children.iter() {
+							let child_range = child_ref.byte_range();
+							let child_start = child_range.start;
+							let child_end = child_range.end;
+							if child_start > prev_end {
+								child_docs.push(ctx_walk.doc_range(prev_end, child_start));
+							}
+							let child_doc = child_ref.doc_id();
+							if child_doc >= 0 {
+								child_docs.push(child_doc as usize);
+								has_doc = true;
+							}
+							else {
+								let raw = ctx_walk.doc_range(child_start, child_end);
+								ctx_walk.set_node_doc_id_ref(child_ref, raw as INT);
+								child_docs.push(raw as usize);
+							}
+							prev_end = child_end;
+						}
+					}
+					if prev_end < range.end {
+						child_docs.push(ctx_walk.doc_range(prev_end, range.end));
+					}
+					if has_doc {
+						ctx_walk.doc_concat(child_docs) as INT
+					}
+					else {
+						ctx_walk.doc_range(range.start, range.end) as INT
+					}
+				};
+				ctx_walk.set_node_doc_id_ref(node_ref, doc_id);
+				if root_key.as_ref() == Some(&key) {
+					root_doc_id = doc_id;
+				}
+			}
+			let build_ms = build_start.elapsed().as_millis() as i64;
+			if profile_enabled {
+				let total_ms = query_ms + traverse_ms + build_ms;
+				let marked_count = marked.len();
+				let node_ref_ms = node_ref_ns as f64 / 1_000_000.0;
+				eprintln!("[neatify] walk profile ({language})");
+				eprintln!("  ------------------------------------------------------------");
+				if let Some((nodes, total_ns)) = ctx_walk.precache_stats() {
+					let total_ms = total_ns as f64 / 1_000_000.0;
+					let cache_miss = ctx_walk.cache_miss_count();
+					eprintln!(
+						"  Precache   : {:>9.3} ms | nodes {nodes} | cache_miss {cache_miss}",
+						total_ms
+					);
+				}
+				eprintln!("  Mode       : kind-ids");
+				eprintln!("  Time (ms)  : query {query_ms} | traverse {traverse_ms} | build {build_ms} | total {total_ms}");
+				eprintln!("  Matches    : {match_count}   Captures: {capture_count}");
+				eprintln!("  Marked     : {marked_count}   Captured: {capture_count}");
+				eprintln!("  Rule Calls : {rule_calls}   Children: {children_total}");
+				eprintln!(
+					"  NodeRef    : {:>9.3} ms | calls {node_ref_calls}",
+					node_ref_ms
+				);
+				if let Some(counts) = capture_kind_counts.as_ref() {
+					let mut count_by_name: HashMap<String, i64> = HashMap::new();
+					let mut ids_by_name: HashMap<String, Vec<u16>> = HashMap::new();
+					for (id, count) in counts.iter() {
+						let name = lang.node_kind_for_id(*id)
+							.unwrap_or("unknown")
+							.to_string();
+						*count_by_name.entry(name.clone()).or_insert(0) += *count;
+						ids_by_name.entry(name)
+							.or_default()
+							.push(*id);
+					}
+					if let Some(names) = rewrite_kind_names.as_ref() {
+						let mut captured: Vec<String> = Vec::new();
+						let mut uncaptured: Vec<String> = Vec::new();
+						for (name, _) in names.iter() {
+							let count = count_by_name.get(name)
+								.copied()
+								.unwrap_or(0);
+							if count > 0 {
+								captured.push(name.clone());
+							}
+							else {
+								uncaptured.push(name.clone());
+							}
+						}
+						captured.sort();
+						uncaptured.sort();
+						eprintln!("  Captured Kinds:");
+						for name in captured.iter() {
+							let count = count_by_name.get(name)
+								.copied()
+								.unwrap_or(0);
+							let mut ids = ids_by_name.get(name)
+								.cloned()
+								.unwrap_or_default();
+							ids.sort();
+							let id_text = gray_text(
+								&ids.iter()
+									.map(|id| format!("#{id}"))
+									.collect::<Vec<_>>().join(",")
+							);
+							eprintln!("    {name} ({id_text}): {count}");
+						}
+						if !uncaptured.is_empty() {
+							eprintln!("  Uncaptured Kinds:");
+							for name in uncaptured.iter() {
+								let ids = names.iter()
+									.find(|(n, _)| n == name)
+									.map(|(_, ids)| ids.clone())
+									.unwrap_or_default();
+								let mut ids = ids;
+								ids.sort();
+								let id_text = gray_text(
+									&ids.iter()
+										.map(|id| format!("#{id}"))
+										.collect::<Vec<_>>().join(",")
+								);
+								eprintln!("    {name} ({id_text}): 0");
+							}
+						}
+					}
+					else if !counts.is_empty() {
+						eprintln!("  Captured Kinds:");
+						let mut names: Vec<String> = count_by_name.keys()
+							.cloned()
+							.collect();
+						names.sort();
+						for name in names {
+							let count = count_by_name.get(&name)
+								.copied()
+								.unwrap_or(0);
+							let mut ids = ids_by_name.get(&name)
+								.cloned()
+								.unwrap_or_default();
+							ids.sort();
+							let id_text = gray_text(
+								&ids.iter()
+									.map(|id| format!("#{id}"))
+									.collect::<Vec<_>>().join(",")
+							);
+							eprintln!("    {name} ({id_text}): {count}");
+						}
+					}
+				}
+				if invalid_queries > 0 {
+					eprintln!("  Invalid Qs : {invalid_queries}");
+				}
+				eprintln!("  ------------------------------------------------------------");
+			}
+			return Ok(root_doc_id);
+		}
+		return Ok(0);
+	}
+	let mut capture_kind_counts: Option<HashMap<u16, i64>> = if profile_enabled {
+		Some(HashMap::new())
+	}
+	else {
+		None
+	};
+	let (marked, captured) = if profile_enabled {
+		let query_start = Instant::now();
+		let mut marked: HashSet<NodeKey> = HashSet::new();
+		let mut captured: HashSet<NodeKey> = HashSet::new();
+		if !ctx_walk.test_group_enabled() {
+			let combined = query_list.join("\n\n");
+			if let Some(query) = ctx_walk.cached_query(language, &combined, &lang) {
+				used_combined = true;
+				let mut cursor = QueryCursor::new();
+				let mut matches = cursor.matches(&query, root, source_bytes.as_slice());
+				while let Some(m) = matches.next() {
+					match_count += 1;
+					for capture in m.captures.iter() {
+						capture_count += 1;
+						let node = capture.node;
+						if let Some(counts) = capture_kind_counts.as_mut() {
+							let entry = counts.entry(node.kind_id()).or_insert(0);
+							*entry += 1;
+						}
+						captured.insert(NodeKey::from_ts_node(&node));
+						let mut current = Some(node);
+						while let Some(n) = current {
+							marked.insert(NodeKey::from_ts_node(&n));
+							current = n.parent();
+						}
+					}
+				}
+			}
+			else {
+				for q in query_list.iter() {
+					let Some(query) = ctx_walk.cached_query(language, q, &lang) else {
+						invalid_queries += 1;
+						continue;
+					};
+					let mut cursor = QueryCursor::new();
+					let mut matches = cursor.matches(&query, root, source_bytes.as_slice());
+					while let Some(m) = matches.next() {
+						match_count += 1;
+						for capture in m.captures.iter() {
+							capture_count += 1;
+							let node = capture.node;
+							if let Some(counts) = capture_kind_counts.as_mut() {
+								let entry = counts.entry(node.kind_id()).or_insert(0);
+								*entry += 1;
+							}
+							captured.insert(NodeKey::from_ts_node(&node));
+							let mut current = Some(node);
+							while let Some(n) = current {
+								marked.insert(NodeKey::from_ts_node(&n));
+								current = n.parent();
+							}
+						}
+					}
+				}
+			}
+		}
+		else {
+			for q in query_list.iter() {
+				let Some(query) = ctx_walk.cached_query(language, q, &lang) else {
+					invalid_queries += 1;
+					continue;
+				};
+				let mut cursor = QueryCursor::new();
+				let mut matches = cursor.matches(&query, root, source_bytes.as_slice());
+				while let Some(m) = matches.next() {
+					match_count += 1;
+					for capture in m.captures.iter() {
+						capture_count += 1;
+						let node = capture.node;
+						if let Some(counts) = capture_kind_counts.as_mut() {
+							let entry = counts.entry(node.kind_id()).or_insert(0);
+							*entry += 1;
+						}
+						captured.insert(NodeKey::from_ts_node(&node));
+						let mut current = Some(node);
+						while let Some(n) = current {
+							marked.insert(NodeKey::from_ts_node(&n));
+							current = n.parent();
+						}
+					}
+				}
+			}
+		}
+		marked.insert(NodeKey::from_ts_node(&root));
+		query_ms = query_start.elapsed().as_millis() as i64;
+		(marked, captured)
+	}
+	else if !ctx_walk.test_group_enabled() {
+		collect_marked_captured_combined(
+			ctx_walk,
+			language,
+			&lang,
+			root,
+			source_bytes.as_slice(),
+			&query_list
+		)
+	}
+	else {
+		collect_marked_captured(
+			ctx_walk,
+			language,
+			&lang,
+			root,
+			source_bytes.as_slice(),
+			&query_list
+		)
+	};
+	if ctx_walk.debug_enabled() {
+		let mut stack = vec![root];
+		while let Some(node) = stack.pop() {
+			if node.is_error() || node.is_missing() {
+				let kind_name = lang.node_kind_for_id(node.kind_id()).unwrap_or("unknown");
+				eprintln!(
+					"[neatify] error node in {language} at {}..{} ({kind_name})",
+					node.start_byte(),
+					node.end_byte()
+				);
+			}
+			let mut cursor = node.walk();
+			if cursor.goto_first_child() {
+				loop {
+					stack.push(cursor.node());
+					if !cursor.goto_next_sibling() {
+						break;
+					}
+				}
+			}
+		}
+	}
+	let traverse_start = Instant::now();
+	let mut nodes: Vec<tree_sitter::Node> = Vec::new();
+	let mut stack = vec![(root, false)];
+	while let Some((node, visited)) = stack.pop() {
+		let key = NodeKey::from_ts_node(&node);
+		if !marked.contains(&key) {
+			continue;
+		}
+		if visited {
+			nodes.push(node);
+			continue;
+		}
+		stack.push((node, true));
+		let mut cursor = node.walk();
+		if cursor.goto_first_child() {
+			let mut children = Vec::new();
+			loop {
+				children.push(cursor.node());
+				if !cursor.goto_next_sibling() {
+					break;
+				}
+			}
+			for child in children.into_iter().rev() {
+				if marked.contains(&NodeKey::from_ts_node(&child)) {
+					stack.push((child, false));
+				}
+			}
+		}
+	}
+	if nodes.is_empty() {
+		return Ok(0);
+	}
+	let traverse_ms = traverse_start.elapsed().as_millis() as i64;
+	let build_start = Instant::now();
+	let mut rule_calls: i64 = 0;
+	let mut children_total: i64 = 0;
+	let root_key = NodeKey::from_ts_node(nodes.last().unwrap());
+	let mut root_doc_id: INT = 0;
+	for node in nodes.iter() {
+		let key = NodeKey::from_ts_node(node);
+		let doc_id: INT = if captured.contains(&key) {
+			rule_calls += 1;
+			let node_ref = if profile_enabled {
+				let start = Instant::now();
+				let node_ref = ctx_walk.node_ref(*node, language);
+				node_ref_ns += start.elapsed().as_nanos();
+				node_ref_calls += 1;
+				node_ref
+			}
+			else {
+				ctx_walk.node_ref(*node, language)
+			};
+			if let Some(parent_node) = node.parent() {
+				let parent_ref = if profile_enabled {
+					let start = Instant::now();
+					let parent_ref = ctx_walk.node_ref(parent_node, language);
+					node_ref_ns += start.elapsed().as_nanos();
+					node_ref_calls += 1;
+					parent_ref
+				}
+				else {
+					ctx_walk.node_ref(parent_node, language)
+				};
+				node_ref.set_parent_cache(Some(Arc::downgrade(&parent_ref)));
+			}
+			let mut children_refs = Vec::new();
+			let mut cursor = node.walk();
+			if cursor.goto_first_child() {
+				loop {
+					let child_node = cursor.node();
+					let child_ref = if profile_enabled {
+						let start = Instant::now();
+						let child_ref = ctx_walk.node_ref(child_node, language);
+						node_ref_ns += start.elapsed().as_nanos();
+						node_ref_calls += 1;
+						child_ref
+					}
+					else {
+						ctx_walk.node_ref(child_node, language)
+					};
+					children_refs.push(child_ref);
+					if !cursor.goto_next_sibling() {
+						break;
+					}
+				}
+			}
+			if !children_refs.is_empty() {
+				children_total += children_refs.len() as i64;
+				for i in 0..children_refs.len() {
+					let parent_weak = Arc::downgrade(&node_ref);
+					children_refs[i].set_parent_cache(Some(parent_weak));
+					if i + 1 < children_refs.len() {
+						let next_weak = Arc::downgrade(&children_refs[i + 1]);
+						children_refs[i].set_next_sibling_cache(Some(next_weak));
+					}
+					if i > 0 {
+						let prev_weak = Arc::downgrade(&children_refs[i - 1]);
+						children_refs[i].set_prev_sibling_cache(Some(prev_weak));
+					}
+				}
+				node_ref.set_children_cache(children_refs);
+			}
+			if node_ref.is_error() || node_ref.is_missing() {
+				if ctx_walk.debug_enabled() {
+					let kind_name = lang.node_kind_for_id(node_ref.kind_id()).unwrap_or("unknown");
+					eprintln!(
+						"[neatify] error node in {language} at {}..{} ({kind_name})",
+						node_ref.byte_range().start,
+						node_ref.byte_range().end
+					);
+				}
+				ctx_walk.doc_range(node.start_byte(), node.end_byte()) as INT
+			}
+			else {
+				rule.call_within_context(&ctx_call, (node_ref.clone(), node_ref)).map_err(Box::<EvalAltResult>::from)?
+			}
+		}
+		else {
+			if (node.is_error() || node.is_missing()) && ctx_walk.debug_enabled() {
+				let kind_name = lang.node_kind_for_id(node.kind_id()).unwrap_or("unknown");
+				eprintln!(
+					"[neatify] error node in {language} at {}..{} ({kind_name})",
+					node.start_byte(),
+					node.end_byte()
+				);
+			}
+			let mut child_docs: Vec<usize> = Vec::new();
+			let mut has_doc = false;
+			let mut cursor = node.walk();
+			let mut prev_end = node.start_byte();
+			if cursor.goto_first_child() {
+				loop {
+					let child = cursor.node();
+					let child_start = child.start_byte();
+					let child_end = child.end_byte();
+					if child_start > prev_end {
+						child_docs.push(ctx_walk.doc_range(prev_end, child_start));
+					}
+					let child_ref = if profile_enabled {
+						let start = Instant::now();
+						let child_ref = ctx_walk.node_ref(child, language);
+						node_ref_ns += start.elapsed().as_nanos();
+						node_ref_calls += 1;
+						child_ref
+					}
+					else {
+						ctx_walk.node_ref(child, language)
+					};
+					let child_doc = child_ref.doc_id();
+					if child_doc >= 0 {
+						child_docs.push(child_doc as usize);
+						has_doc = true;
+					}
+					else {
+						let raw = ctx_walk.doc_range(child_start, child_end);
+						ctx_walk.set_node_doc_id(&child, language, raw as INT);
+						child_docs.push(raw as usize);
+					}
+					prev_end = child_end;
+					if !cursor.goto_next_sibling() {
+						break;
+					}
+				}
+			}
+			if prev_end < node.end_byte() {
+				child_docs.push(ctx_walk.doc_range(prev_end, node.end_byte()));
+			}
+			if has_doc {
+				ctx_walk.doc_concat(child_docs) as INT
+			}
+			else {
+				ctx_walk.doc_range(node.start_byte(), node.end_byte()) as INT
+			}
+		};
+		ctx_walk.set_node_doc_id(node, language, doc_id);
+		if key == root_key {
+			root_doc_id = doc_id;
+		}
+	}
+	let build_ms = build_start.elapsed().as_millis() as i64;
+	if profile_enabled {
+		let total_ms = query_ms + traverse_ms + build_ms;
+		let mode = if ctx_walk.test_group_enabled() {
+			"per-query"
+		}
+		else if used_combined {
+			"combined"
+		}
+		else {
+			"combined-fallback"
+		};
+		let node_ref_ms = node_ref_ns as f64 / 1_000_000.0;
+		eprintln!("[neatify] walk profile ({language})");
+		eprintln!("  ------------------------------------------------------------");
+		if let Some((nodes, total_ns)) = ctx_walk.precache_stats() {
+			let total_ms = total_ns as f64 / 1_000_000.0;
+			let cache_miss = ctx_walk.cache_miss_count();
+			eprintln!(
+				"  Precache   : {:>9.3} ms | nodes {nodes} | cache_miss {cache_miss}",
+				total_ms
+			);
+		}
+		eprintln!("  Mode       : {mode}");
+		eprintln!("  Time (ms)  : query {query_ms} | traverse {traverse_ms} | build {build_ms} | total {total_ms}");
+		eprintln!("  Matches    : {match_count}   Captures: {capture_count}");
+		eprintln!(
+			"  Marked     : {}   Captured: {}",
+			marked.len(),
+			captured.len()
+		);
+		eprintln!("  Rule Calls : {rule_calls}   Children: {children_total}");
+		eprintln!(
+			"  NodeRef    : {:>9.3} ms | calls {node_ref_calls}",
+			node_ref_ms
+		);
+		if let Some(counts) = capture_kind_counts.as_ref() {
+			if !counts.is_empty() {
+				eprintln!("  Captured Kinds:");
+				for (id, name, count) in capture_kind_counts_sorted(counts, &lang) {
+					let id_text = gray_text(&format!("#{id}"));
+					eprintln!("    {name} ({id_text}): {count}");
+				}
+			}
+		}
+		if invalid_queries > 0 {
+			eprintln!("  Invalid Qs : {invalid_queries}");
+		}
+		eprintln!("  ------------------------------------------------------------");
+	}
+	Ok(root_doc_id)
 }
 
 pub fn register_primitives(engine: &mut Engine, ctx: Context) {
@@ -437,7 +1284,9 @@ pub fn register_primitives(engine: &mut Engine, ctx: Context) {
 		"query_ranges",
 		move |language: &str, query: &str| -> Array {
 			let ranges = ctx_query_ranges.query_ranges(language, query);
-			ranges.into_iter().map(Dynamic::from).collect()
+			ranges.into_iter()
+				.map(Dynamic::from)
+				.collect()
 		}
 	);
 	let ctx_root = ctx.clone();
@@ -451,330 +1300,20 @@ pub fn register_primitives(engine: &mut Engine, ctx: Context) {
 	engine.register_fn(
 		"walk",
 		move |ctx_call: NativeCallContext, language: &str, queries: Array, rule: FnPtr| -> RhaiResult<INT> {
-			let mut query_list = Vec::new();
-			for item in queries {
-				let q = item.into_string().map_err(|_| "walk query list expects strings")?;
-				if !q.trim().is_empty() {
-					query_list.push(q);
-				}
+			walk_impl(&ctx_walk, ctx_call, language, queries, rule, true)
+		}
+	);
+	let ctx_walk_opts = ctx.clone();
+	engine.register_fn(
+		"walk",
+		move |ctx_call: NativeCallContext, language: &str, queries: Array, rule: FnPtr, opts: Map| -> RhaiResult<INT> {
+			let mut rewrite = true;
+			if let Some(value) = opts.get("rewrite") {
+				rewrite = value.clone()
+					.as_bool()
+					.map_err(|_| "walk opts.rewrite expects boolean")?;
 			}
-			if query_list.is_empty() {
-				return Ok(0);
-			}
-			let Some(lang) = ctx_walk.language_for(language) else {
-				return Ok(0);
-			};
-			let Some(tree) = ctx_walk.tree_for(language) else {
-				return Ok(0);
-			};
-			let source_bytes = ctx_walk.source_bytes();
-			let root = tree.root_node();
-			let profile_enabled = ctx_walk.profile_enabled();
-			let mut query_ms: i64 = 0;
-			let mut match_count: i64 = 0;
-			let mut capture_count: i64 = 0;
-			let mut invalid_queries: i64 = 0;
-			let mut used_combined = false;
-			let (query_list, invalid) = validate_queries(language, &lang, &query_list);
-			if !invalid.is_empty() {
-				invalid_queries = invalid.len() as i64;
-			}
-			if query_list.is_empty() {
-				return Ok(0);
-			}
-			let (marked, captured) = if profile_enabled {
-				let query_start = Instant::now();
-				let mut marked: HashSet<NodeKey> = HashSet::new();
-				let mut captured: HashSet<NodeKey> = HashSet::new();
-				if !ctx_walk.test_group_enabled() {
-					let combined = query_list.join("\n\n");
-					if let Some(query) = ctx_walk.cached_query(language, &combined, &lang) {
-						used_combined = true;
-						let mut cursor = QueryCursor::new();
-						let mut matches = cursor.matches(&query, root, source_bytes.as_slice());
-						while let Some(m) = matches.next() {
-							match_count += 1;
-							for capture in m.captures.iter() {
-								capture_count += 1;
-								let node = capture.node;
-								captured.insert(NodeKey::from_ts_node(&node));
-								let mut current = Some(node);
-								while let Some(n) = current {
-									marked.insert(NodeKey::from_ts_node(&n));
-									current = n.parent();
-								}
-							}
-						}
-					}
-					else {
-						for q in query_list.iter() {
-							let Some(query) = ctx_walk.cached_query(language, q, &lang) else {
-								invalid_queries += 1;
-								continue;
-							};
-							let mut cursor = QueryCursor::new();
-							let mut matches = cursor.matches(&query, root, source_bytes.as_slice());
-							while let Some(m) = matches.next() {
-								match_count += 1;
-								for capture in m.captures.iter() {
-									capture_count += 1;
-									let node = capture.node;
-									captured.insert(NodeKey::from_ts_node(&node));
-									let mut current = Some(node);
-									while let Some(n) = current {
-										marked.insert(NodeKey::from_ts_node(&n));
-										current = n.parent();
-									}
-								}
-							}
-						}
-					}
-				}
-				else {
-					for q in query_list.iter() {
-						let Some(query) = ctx_walk.cached_query(language, q, &lang) else {
-							invalid_queries += 1;
-							continue;
-						};
-						let mut cursor = QueryCursor::new();
-						let mut matches = cursor.matches(&query, root, source_bytes.as_slice());
-						while let Some(m) = matches.next() {
-							match_count += 1;
-							for capture in m.captures.iter() {
-								capture_count += 1;
-								let node = capture.node;
-								captured.insert(NodeKey::from_ts_node(&node));
-								let mut current = Some(node);
-								while let Some(n) = current {
-									marked.insert(NodeKey::from_ts_node(&n));
-									current = n.parent();
-								}
-							}
-						}
-					}
-				}
-				marked.insert(NodeKey::from_ts_node(&root));
-				query_ms = query_start.elapsed().as_millis() as i64;
-				(marked, captured)
-			}
-			else if !ctx_walk.test_group_enabled() {
-				collect_marked_captured_combined(
-					&ctx_walk,
-					language,
-					&lang,
-					root,
-					source_bytes.as_slice(),
-					&query_list
-				)
-			}
-			else {
-				collect_marked_captured(
-					&ctx_walk,
-					language,
-					&lang,
-					root,
-					source_bytes.as_slice(),
-					&query_list
-				)
-			};
-			if ctx_walk.debug_enabled() {
-				let mut stack = vec![root];
-				while let Some(node) = stack.pop() {
-					if node.is_error() || node.is_missing() {
-						let kind_name = lang.node_kind_for_id(node.kind_id()).unwrap_or("unknown");
-						eprintln!(
-							"[neatify] error node in {language} at {}..{} ({kind_name})",
-							node.start_byte(),
-							node.end_byte()
-						);
-					}
-					let mut cursor = node.walk();
-					if cursor.goto_first_child() {
-						loop {
-							stack.push(cursor.node());
-							if !cursor.goto_next_sibling() {
-								break;
-							}
-						}
-					}
-				}
-			}
-			let traverse_start = Instant::now();
-			let mut nodes: Vec<tree_sitter::Node> = Vec::new();
-			let mut stack = vec![(root, false)];
-			while let Some((node, visited)) = stack.pop() {
-				let key = NodeKey::from_ts_node(&node);
-				if !marked.contains(&key) {
-					continue;
-				}
-				if visited {
-					nodes.push(node);
-					continue;
-				}
-				stack.push((node, true));
-				let mut cursor = node.walk();
-				if cursor.goto_first_child() {
-					let mut children = Vec::new();
-					loop {
-						children.push(cursor.node());
-						if !cursor.goto_next_sibling() {
-							break;
-						}
-					}
-					for child in children.into_iter().rev() {
-						if marked.contains(&NodeKey::from_ts_node(&child)) {
-							stack.push((child, false));
-						}
-					}
-				}
-			}
-			if nodes.is_empty() {
-				return Ok(0);
-			}
-			let traverse_ms = traverse_start.elapsed().as_millis() as i64;
-			let build_start = Instant::now();
-			let mut rule_calls: i64 = 0;
-			let mut children_total: i64 = 0;
-			let root_key = NodeKey::from_ts_node(nodes.last().unwrap());
-			let mut root_doc_id: INT = 0;
-			for node in nodes.iter() {
-				let key = NodeKey::from_ts_node(node);
-				let doc_id: INT = if captured.contains(&key) {
-					rule_calls += 1;
-					let node_ref = ctx_walk.node_ref(*node, language);
-					if let Some(parent_node) = node.parent() {
-						let parent_ref = ctx_walk.node_ref(parent_node, language);
-						node_ref.set_parent_cache(Some(Arc::downgrade(&parent_ref)));
-					}
-					let mut children_refs = Vec::new();
-					let mut cursor = node.walk();
-					if cursor.goto_first_child() {
-						loop {
-							let child_node = cursor.node();
-							children_refs.push(ctx_walk.node_ref(child_node, language));
-							if !cursor.goto_next_sibling() {
-								break;
-							}
-						}
-					}
-					if !children_refs.is_empty() {
-						children_total += children_refs.len() as i64;
-						for i in 0..children_refs.len() {
-							let parent_weak = Arc::downgrade(&node_ref);
-							children_refs[i].set_parent_cache(Some(parent_weak));
-							if i + 1 < children_refs.len() {
-								let next_weak = Arc::downgrade(&children_refs[i + 1]);
-								children_refs[i].set_next_sibling_cache(Some(next_weak));
-							}
-							if i > 0 {
-								let prev_weak = Arc::downgrade(&children_refs[i - 1]);
-								children_refs[i].set_prev_sibling_cache(Some(prev_weak));
-							}
-						}
-						node_ref.set_children_cache(children_refs);
-					}
-					if node_ref.is_error() || node_ref.is_missing() {
-						if ctx_walk.debug_enabled() {
-							let kind_name = lang.node_kind_for_id(node_ref.kind_id()).unwrap_or("unknown");
-							eprintln!(
-								"[neatify] error node in {language} at {}..{} ({kind_name})",
-								node_ref.byte_range().start,
-								node_ref.byte_range().end
-							);
-						}
-						ctx_walk.doc_range(node.start_byte(), node.end_byte()) as INT
-					}
-					else {
-						rule.call_within_context(&ctx_call, (node_ref.clone(), node_ref))
-							.map_err(Box::<EvalAltResult>::from)?
-					}
-				}
-				else {
-					if (node.is_error() || node.is_missing()) && ctx_walk.debug_enabled() {
-						let kind_name = lang.node_kind_for_id(node.kind_id()).unwrap_or("unknown");
-						eprintln!(
-							"[neatify] error node in {language} at {}..{} ({kind_name})",
-							node.start_byte(),
-							node.end_byte()
-						);
-					}
-					let mut child_docs: Vec<usize> = Vec::new();
-					let mut has_doc = false;
-					let mut cursor = node.walk();
-					let mut prev_end = node.start_byte();
-					if cursor.goto_first_child() {
-						loop {
-							let child = cursor.node();
-							let child_start = child.start_byte();
-							let child_end = child.end_byte();
-							if child_start > prev_end {
-								child_docs.push(ctx_walk.doc_range(prev_end, child_start));
-							}
-							let child_ref = ctx_walk.node_ref(child, language);
-							let child_doc = child_ref.doc_id();
-							if child_doc >= 0 {
-								child_docs.push(child_doc as usize);
-								has_doc = true;
-							}
-							else {
-								let raw = ctx_walk.doc_range(child_start, child_end);
-								ctx_walk.set_node_doc_id(&child, language, raw as INT);
-								child_docs.push(raw as usize);
-							}
-							prev_end = child_end;
-							if !cursor.goto_next_sibling() {
-								break;
-							}
-						}
-					}
-					if prev_end < node.end_byte() {
-						child_docs.push(ctx_walk.doc_range(prev_end, node.end_byte()));
-					}
-					if has_doc {
-						ctx_walk.doc_concat(child_docs) as INT
-					}
-					else {
-						ctx_walk.doc_range(node.start_byte(), node.end_byte()) as INT
-					}
-				};
-				ctx_walk.set_node_doc_id(node, language, doc_id);
-				if key == root_key {
-					root_doc_id = doc_id;
-				}
-			}
-			let build_ms = build_start.elapsed().as_millis() as i64;
-			if profile_enabled {
-				let total_ms = query_ms + traverse_ms + build_ms;
-				let mode = if ctx_walk.test_group_enabled() {
-					"per-query"
-				}
-				else if used_combined {
-					"combined"
-				}
-				else {
-					"combined-fallback"
-				};
-				eprintln!("[neatify] walk profile ({language})");
-				eprintln!("  ------------------------------------------------------------");
-				if let Some((nodes, total_ns)) = ctx_walk.precache_stats() {
-					let total_ms = total_ns as f64 / 1_000_000.0;
-					let cache_miss = ctx_walk.cache_miss_count();
-					eprintln!(
-						"  Precache   : {:>9.3} ms | nodes {nodes} | cache_miss {cache_miss}",
-						total_ms
-					);
-				}
-				eprintln!("  Mode       : {mode}");
-				eprintln!("  Time (ms)  : query {query_ms} | traverse {traverse_ms} | build {build_ms} | total {total_ms}");
-				eprintln!("  Matches    : {match_count}   Captures: {capture_count}");
-				eprintln!("  Marked     : {}   Captured: {}", marked.len(), captured.len());
-				eprintln!("  Rule Calls : {rule_calls}   Children: {children_total}");
-				if invalid_queries > 0 {
-					eprintln!("  Invalid Qs : {invalid_queries}");
-				}
-				eprintln!("  ------------------------------------------------------------");
-			}
-			Ok(root_doc_id)
+			walk_impl(&ctx_walk_opts, ctx_call, language, queries, rule, rewrite)
 		}
 	);
 	engine.register_fn(
@@ -844,6 +1383,12 @@ pub fn register_primitives(engine: &mut Engine, ctx: Context) {
 		}
 	);
 	engine.register_fn(
+		"token_len",
+		|node: &mut Arc<NodeRef>| -> INT {
+			node.token_len() as INT
+		}
+	);
+	engine.register_fn(
 		"ancestor",
 		|node: &mut Arc<NodeRef>, kinds: Array| -> RhaiResult<Dynamic> {
 			let mut kind_ids: Vec<u16> = Vec::with_capacity(kinds.len());
@@ -883,13 +1428,19 @@ pub fn register_primitives(engine: &mut Engine, ctx: Context) {
 			let mut stop_kinds: Option<Vec<u16>> = None;
 			let mut continue_kinds: Option<Vec<u16>> = None;
 			if let Some(value) = opts.get("furthest") {
-				furthest = value.clone().as_bool().map_err(|_| "ancestor opts.furthest expects boolean")?;
+				furthest = value.clone()
+					.as_bool()
+					.map_err(|_| "ancestor opts.furthest expects boolean")?;
 			}
 			if let Some(value) = opts.get("boundary") {
-				boundary = value.clone().as_bool().map_err(|_| "ancestor opts.boundary expects boolean")?;
+				boundary = value.clone()
+					.as_bool()
+					.map_err(|_| "ancestor opts.boundary expects boolean")?;
 			}
 			if let Some(value) = opts.get("self") {
-				include_self = value.clone().as_bool().map_err(|_| "ancestor opts.self expects boolean")?;
+				include_self = value.clone()
+					.as_bool()
+					.map_err(|_| "ancestor opts.self expects boolean")?;
 			}
 			if let Some(value) = opts.get("stop") {
 				let array = value.clone().try_cast::<Array>().ok_or("ancestor opts.stop expects array of kind ids")?;
@@ -949,7 +1500,11 @@ pub fn register_primitives(engine: &mut Engine, ctx: Context) {
 		"kind",
 		|node: &mut Arc<NodeRef>, idx: INT| -> RhaiResult<INT> {
 			let idx = int_to_usize(idx, "idx")?;
-			Ok(node.child_kind_id(idx).map(|k| k as INT).unwrap_or(-1))
+			Ok(
+				node.child_kind_id(idx)
+					.map(|k| k as INT)
+					.unwrap_or(-1)
+			)
 		}
 	);
 	engine.register_fn(
@@ -1181,8 +1736,12 @@ pub fn register_primitives(engine: &mut Engine, ctx: Context) {
 			}
 			let mut out = Array::new();
 			for i in 0..names.len() {
-				let name = names[i].clone().into_string().map_err(|_| "kind_ids expects string names")?;
-				let named = named_flags[i].clone().as_bool().map_err(|_| "kind_ids expects boolean flags")?;
+				let name = names[i].clone()
+					.into_string()
+					.map_err(|_| "kind_ids expects string names")?;
+				let named = named_flags[i].clone()
+					.as_bool()
+					.map_err(|_| "kind_ids expects boolean flags")?;
 				let id = lang.id_for_node_kind(&name, named) as INT;
 				out.push(Dynamic::from_int(id));
 			}
@@ -1201,8 +1760,12 @@ pub fn register_primitives(engine: &mut Engine, ctx: Context) {
 			}
 			let mut out = Map::new();
 			for i in 0..names.len() {
-				let name = names[i].clone().into_string().map_err(|_| "kind_ids_map expects string names")?;
-				let named = named_flags[i].clone().as_bool().map_err(|_| "kind_ids_map expects boolean flags")?;
+				let name = names[i].clone()
+					.into_string()
+					.map_err(|_| "kind_ids_map expects string names")?;
+				let named = named_flags[i].clone()
+					.as_bool()
+					.map_err(|_| "kind_ids_map expects boolean flags")?;
 				let id = lang.id_for_node_kind(&name, named) as INT;
 				out.insert(name.into(), Dynamic::from_int(id));
 			}

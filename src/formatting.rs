@@ -1,12 +1,49 @@
 use crate::{register_primitives, Context, ParseIssue, Range};
 use libloading::Library;
-use rhai::{Dynamic, Engine, Module, ModuleResolver, Scope};
+use rhai::{Dynamic, Engine, Module, ModuleResolver, Scope, AST};
 use serde::Deserialize;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::SystemTime;
 
 const PARSE_ERROR_PREFIX: &str = "parse error: ";
+
+struct CachedAst {
+	mtime: Option<SystemTime>,
+	ast: AST,
+}
+thread_local! {
+	static AST_CACHE: RefCell<HashMap<PathBuf, CachedAst>> = RefCell::new(HashMap::new());
+}
+fn entry_mtime(path: &Path) -> Option<SystemTime> {
+	std::fs::metadata(path).and_then(|meta| meta.modified()).ok()
+}
+
+fn compile_ast_cached(engine: &Engine, entry_path: &Path) -> Result<AST, String> {
+	let mtime = entry_mtime(entry_path);
+	let key = entry_path.to_path_buf();
+	AST_CACHE.with(
+		|cache| {
+			let mut cache = cache.borrow_mut();
+			if let Some(existing) = cache.get(&key) {
+				if existing.mtime == mtime {
+					return Ok(existing.ast.clone());
+				}
+			}
+			let ast = engine.compile_file(key.clone()).map_err(|e| format!("compile error: {e}"))?;
+			cache.insert(
+				key,
+				CachedAst {
+					mtime,
+					ast: ast.clone()
+				}
+			);
+			Ok(ast)
+		}
+	)
+}
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct TreesitterSpec {
@@ -62,7 +99,9 @@ pub fn resolve_treesitter_binary(path: &str, roots: &[PathBuf]) -> Result<PathBu
 		"macos" => "dylib",
 		_ => "so",
 	};
-	let resolved = path.replace("{os}", os).replace("{arch}", arch).replace("{ext}", ext);
+	let resolved = path.replace("{os}", os)
+		.replace("{arch}", arch)
+		.replace("{ext}", ext);
 	resolve_registry_path(&resolved, roots)
 		.ok_or_else(|| format!("treesitter binary not found: {resolved}"))
 }
@@ -78,8 +117,7 @@ pub fn resolve_language_spec(language: &str, roots: &[PathBuf]) -> Result<Langua
 		.ok_or_else(|| format!("language spec not found: {language_path}"))?;
 	let content = std::fs::read_to_string(&spec_path)
 		.map_err(|e| format!("failed to read {}: {e}", spec_path.display()))?;
-	let spec: LanguageSpec = toml::from_str(&content)
-		.map_err(|e| format!("invalid language spec {}: {e}", spec_path.display()))?;
+	let spec: LanguageSpec = toml::from_str(&content).map_err(|e| format!("invalid language spec {}: {e}", spec_path.display()))?;
 	Ok(spec)
 }
 
@@ -201,7 +239,9 @@ pub(crate) fn format_source_with_settings(
 	engine.register_fn(
 		"setting",
 		move |key: &str, default: Dynamic| -> Dynamic {
-			settings_for_get.get(key).cloned().unwrap_or(default)
+			settings_for_get.get(key)
+				.cloned()
+				.unwrap_or(default)
 		}
 	);
 	let debug_enabled = debug;
@@ -213,7 +253,7 @@ pub(crate) fn format_source_with_settings(
 			}
 		}
 	);
-	let ast = engine.compile_file(entry_path.to_path_buf()).map_err(|e| format!("compile error: {e}"))?;
+	let ast = compile_ast_cached(&engine, entry_path)?;
 	if strict {
 		let issues = ctx.parse_issues(language, 6)?;
 		if !issues.is_empty() {
@@ -305,8 +345,7 @@ pub(crate) fn format_fragment_with_settings(
 		test_group,
 		strict
 	)?;
-	let start_idx = formatted.find(&start_marker)
-		.ok_or_else(|| "start marker not found after formatting".to_string())?;
+	let start_idx = formatted.find(&start_marker).ok_or_else(|| "start marker not found after formatting".to_string())?;
 	let after_start = start_idx + start_marker.len();
 	let end_idx = formatted[after_start..].find(&end_marker)
 		.map(|i| after_start + i)
@@ -451,7 +490,9 @@ pub(crate) fn format_fragment_optional(
 fn trim_fragment_output(text: &str) -> String {
 	let mut out = text.to_string();
 	while !out.is_empty() {
-		let last = out.chars().last().unwrap();
+		let last = out.chars()
+			.last()
+			.unwrap();
 		if last == '\n' || last == '\r' || last == ' ' || last == '\t' {
 			out.pop();
 		}

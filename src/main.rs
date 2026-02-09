@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::cell::RefCell;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use clap::{Parser, ValueEnum};
@@ -24,9 +25,39 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use serde_json::json;
 use crate::config::{read_config, write_config, NeatifyConfig, RepositoryConfig};
+use tree_sitter::{Language as TsLanguage, Parser as TsParser};
 
 mod lsp;
 mod config;
+
+struct CachedAst {
+	mtime: Option<SystemTime>,
+	ast: AST,
+}
+thread_local! {
+	static AST_CACHE: RefCell<HashMap<PathBuf, CachedAst>> = RefCell::new(HashMap::new());
+}
+fn entry_mtime(path: &Path) -> Option<SystemTime> {
+	std::fs::metadata(path).and_then(|meta| meta.modified()).ok()
+}
+
+fn compile_ast_cached(engine: &Engine, entry_path: &Path) -> Result<AST, String> {
+	let mtime = entry_mtime(entry_path);
+	let key = entry_path.to_path_buf();
+	AST_CACHE.with(
+		|cache| {
+			let mut cache = cache.borrow_mut();
+			if let Some(existing) = cache.get(&key) {
+				if existing.mtime == mtime {
+					return Ok(existing.ast.clone());
+				}
+			}
+			let ast = engine.compile_file(key.clone()).map_err(|e| format!("compile error: {e}"))?;
+			cache.insert(key, CachedAst { mtime, ast: ast.clone() });
+			Ok(ast)
+		}
+	)
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "neatify")]
@@ -89,6 +120,9 @@ struct Cli {
 	/// List available Tree-sitter node kinds and exit
 	#[arg(long = "list-nodes")]
 	list_nodes: bool,
+	/// Dump Tree-sitter parse tree and exit
+	#[arg(long = "dump-tree")]
+	dump_tree: bool,
 	/// Highlight test output (true/false)
 	#[arg(long = "highlight", value_name = "BOOL")]
 	highlight: Option<bool>,
@@ -167,15 +201,13 @@ fn main() {
 		return;
 	}
 	if cli.sync || cli.sync_tests {
-		sync_repositories(&mut config, &cache_root, cli.sync_tests)
-			.unwrap_or_else(|err| exit_with_error(&err));
+		sync_repositories(&mut config, &cache_root, cli.sync_tests).unwrap_or_else(|err| exit_with_error(&err));
 		write_config(&config_path, &config).unwrap_or_else(|err| exit_with_error(&err));
 		return;
 	}
 	let bootstrap_sync = config.repositories.is_empty();
 	if bootstrap_sync {
-		ensure_core_repository_config(&mut config, &cache_root)
-			.unwrap_or_else(|err| exit_with_error(&err));
+		ensure_core_repository_config(&mut config, &cache_root).unwrap_or_else(|err| exit_with_error(&err));
 		write_config(&config_path, &config).unwrap_or_else(|err| exit_with_error(&err));
 		sync_repositories(&mut config, &cache_root, false).unwrap_or_else(|err| exit_with_error(&err));
 		write_config(&config_path, &config).unwrap_or_else(|err| exit_with_error(&err));
@@ -206,7 +238,7 @@ fn main() {
 		return;
 	}
 	if cli.test {
-		run_tests(&cli, &repositories, language.clone(), &file_targets, strict, &reporter)
+		run_tests(&cli, &repositories, language.clone(), &file_targets, &reporter)
 			.unwrap_or_else(|err| exit_with_error(&err));
 		return;
 	}
@@ -217,6 +249,18 @@ fn main() {
 		};
 		let language_spec = resolve_language_spec(language, &repo_roots).unwrap_or_else(|err| exit_with_error(&err));
 		list_language_nodes(&language_spec, &repo_roots).unwrap_or_else(|err| exit_with_error(&err));
+		return;
+	}
+	if cli.dump_tree {
+		dump_trees(
+			&config,
+			&repo_roots,
+			language.as_ref(),
+			&file_targets,
+			range.as_ref(),
+			cli.stdin
+		)
+			.unwrap_or_else(|err| exit_with_error(&err));
 		return;
 	}
 	if cli.lsp {
@@ -257,8 +301,7 @@ fn main() {
 				.unwrap_or_else(|err| exit_with_error(&err))
 		}
 		else {
-			collect_files_from_targets(&file_targets, &config.ignore)
-				.unwrap_or_else(|err| exit_with_error(&err))
+			collect_files_from_targets(&file_targets, &config.ignore).unwrap_or_else(|err| exit_with_error(&err))
 		};
 		if files.is_empty() {
 			exit_with_error("no files found");
@@ -587,7 +630,9 @@ fn ensure_core_repository_config(config: &mut NeatifyConfig, cache_root: &str) -
 }
 
 fn add_core_repository_config(config: &mut NeatifyConfig, cache_root: &str) -> Result<(), String> {
-	if config.repositories.iter().any(|repo| repo.name == "core") {
+	if config.repositories
+		.iter()
+		.any(|repo| repo.name == "core") {
 		return Ok(());
 	}
 	let core_url = "https://example.com/neatify/core";
@@ -626,7 +671,9 @@ pub(crate) struct LanguageSpec {
 }
 
 fn repository_roots(repositories: &[RepositoryRecord]) -> Vec<PathBuf> {
-	repositories.iter().map(|repo| repo.root.clone()).collect()
+	repositories.iter()
+		.map(|repo| repo.root.clone())
+		.collect()
 }
 
 fn resolve_language_spec(language: &str, roots: &[PathBuf]) -> Result<LanguageSpec, String> {
@@ -640,8 +687,7 @@ fn resolve_language_spec(language: &str, roots: &[PathBuf]) -> Result<LanguageSp
 		.ok_or_else(|| format!("language spec not found: {language_path}"))?;
 	let content = std::fs::read_to_string(&spec_path)
 		.map_err(|e| format!("failed to read {}: {e}", spec_path.display()))?;
-	let spec: LanguageSpec = toml::from_str(&content)
-		.map_err(|e| format!("invalid language spec {}: {e}", spec_path.display()))?;
+	let spec: LanguageSpec = toml::from_str(&content).map_err(|e| format!("invalid language spec {}: {e}", spec_path.display()))?;
 	Ok(spec)
 }
 
@@ -710,7 +756,9 @@ impl FormatRunner {
 		engine.register_fn(
 			"setting",
 			move |key: &str, default: Dynamic| -> Dynamic {
-				settings_for_get.get(key).cloned().unwrap_or(default)
+				settings_for_get.get(key)
+					.cloned()
+					.unwrap_or(default)
 			}
 		);
 		let debug_enabled = debug;
@@ -722,7 +770,7 @@ impl FormatRunner {
 				}
 			}
 		);
-		let ast = engine.compile_file(entry_path.to_path_buf()).map_err(|e| format!("compile error: {e}"))?;
+		let ast = compile_ast_cached(&engine, &entry_path)?;
 		Ok(
 			Self {
 				engine,
@@ -730,7 +778,9 @@ impl FormatRunner {
 				ast,
 				entry_path,
 				binary_path,
-				language_name: spec.treesitter.language.clone(),
+				language_name: spec.treesitter
+					.language
+					.clone(),
 				roots: roots.to_vec(),
 				overrides: overrides.to_vec(),
 				debug,
@@ -1126,7 +1176,9 @@ pub(crate) fn resolve_treesitter_binary(path: &str, roots: &[PathBuf]) -> Result
 		"macos" => "dylib",
 		_ => "so",
 	};
-	let resolved = path.replace("{os}", os).replace("{arch}", arch).replace("{ext}", ext);
+	let resolved = path.replace("{os}", os)
+		.replace("{arch}", arch)
+		.replace("{ext}", ext);
 	resolve_registry_path(&resolved, roots)
 		.ok_or_else(|| format!("treesitter binary not found: {resolved}"))
 }
@@ -1153,13 +1205,216 @@ fn list_language_nodes(spec: &LanguageSpec, roots: &[PathBuf]) -> Result<(), Str
 	let count = lang.node_kind_count();
 	for id in 0..count {
 		let name = lang.node_kind_for_id(id as u16).unwrap_or("<unknown>");
-		kinds.push(name.to_string());
+		kinds.push((id as u16, name.to_string()));
 	}
 	println!("node kinds ({}):", kinds.len());
-	for name in kinds {
-		println!("- {name}");
+	for (id, name) in kinds {
+		let id_text = color(&format!("#{id}"), Color::Gray, false);
+		println!("- {name} ({id_text})");
 	}
 	Ok(())
+}
+
+struct DumpTreeRunner {
+	parser: TsParser,
+	language: TsLanguage,
+	_libs: Vec<Library>,
+}
+
+impl DumpTreeRunner {
+	fn new(spec: &LanguageSpec, roots: &[PathBuf]) -> Result<Self, String> {
+		let binary_path = resolve_treesitter_binary(&spec.treesitter.binary, roots)?;
+		let mut libs = Vec::new();
+		let lang = load_treesitter_language(&binary_path, &spec.treesitter.language, &mut libs)?;
+		let mut parser = TsParser::new();
+		parser.set_language(&lang)
+			.map_err(|e| format!("failed to set language '{}': {e}", spec.treesitter.language))?;
+		Ok(
+			Self {
+				parser,
+				language: lang,
+				_libs: libs
+			}
+		)
+	}
+}
+
+#[derive(Default)]
+struct DumpTreeCounts {
+	nodes: usize,
+	errors: usize,
+	missing: usize,
+}
+
+fn dump_trees(
+	config: &NeatifyConfig,
+	roots: &[PathBuf],
+	language: Option<&String>,
+	file_targets: &[String],
+	range: Option<&RangeSpec>,
+	stdin: bool) -> Result<(), String> {
+	if stdin {
+		let Some(language) = language else {
+			return Err("--stdin requires a language".to_string());
+		};
+		if !file_targets.is_empty() {
+			return Err("--stdin cannot be combined with file targets".to_string());
+		}
+		let language_spec = resolve_language_spec(language, roots)?;
+		let mut runner = DumpTreeRunner::new(&language_spec, roots)?;
+		let mut source = String::new();
+		std::io::stdin().read_to_string(&mut source).map_err(|e| format!("read stdin: {e}"))?;
+		dump_tree_for_source(&mut runner, "stdin", &source, range)?;
+		return Ok(());
+	}
+	if let Some(language) = language {
+		let language_spec = resolve_language_spec(language, roots)?;
+		let files = if file_targets.is_empty() {
+			collect_files_for_language(&language_spec.extensions, &config.ignore)?
+		}
+		else {
+			collect_files_from_targets(file_targets, &config.ignore)?
+		};
+		if files.is_empty() {
+			return Err("no files found".to_string());
+		}
+		let mut runner = DumpTreeRunner::new(&language_spec, roots)?;
+		for (idx, file) in files.iter().enumerate() {
+			if idx > 0 {
+				println!();
+			}
+			dump_tree_for_file(&mut runner, file, range)?;
+		}
+		return Ok(());
+	}
+	let files_by_language = collect_files_all(roots, &config.ignore, file_targets)?;
+	if files_by_language.is_empty() {
+		return Err("no files found".to_string());
+	}
+	let mut first = true;
+	for (language, files) in files_by_language.iter() {
+		let language_spec = resolve_language_spec(language, roots)?;
+		let mut runner = DumpTreeRunner::new(&language_spec, roots)?;
+		for file in files.iter() {
+			if first {
+				first = false;
+			}
+			else {
+				println!();
+			}
+			dump_tree_for_file(&mut runner, file, range)?;
+		}
+	}
+	Ok(())
+}
+
+fn dump_tree_for_file(
+	runner: &mut DumpTreeRunner,
+	file: &str,
+	range: Option<&RangeSpec>) -> Result<(), String> {
+	let source = std::fs::read_to_string(file).map_err(|e| format!("read {file}: {e}"))?;
+	dump_tree_for_source(runner, file, &source, range)
+}
+
+fn dump_tree_for_source(
+	runner: &mut DumpTreeRunner,
+	label: &str,
+	source: &str,
+	range: Option<&RangeSpec>) -> Result<(), String> {
+	let tree = runner.parser
+		.parse(source.as_bytes(), None)
+		.ok_or_else(|| "failed to parse".to_string())?;
+	let root = tree.root_node();
+	let target = if let Some(range) = range {
+		let offsets = range_offsets(source, range)?;
+		root.descendant_for_byte_range(offsets.start, offsets.end).unwrap_or(root)
+	}
+	else {
+		root
+	};
+	println!("== {label} ==");
+	let mut counts = DumpTreeCounts::default();
+	dump_tree_node(target, false, &runner.language, &mut counts);
+	let node_text = color(&counts.nodes.to_string(), Color::Green, false);
+	let error_text = color(&counts.errors.to_string(), Color::Red, counts.errors > 0);
+	let missing_text = color(&counts.missing.to_string(), Color::Yellow, counts.missing > 0);
+	println!("Nodes: {node_text}, errors: {error_text}, missing: {missing_text}");
+	Ok(())
+}
+
+fn dump_tree_node(
+	node: tree_sitter::Node,
+	include_unnamed: bool,
+	lang: &TsLanguage,
+	counts: &mut DumpTreeCounts) {
+	let mut stack: Vec<(tree_sitter::Node, usize)> = vec![(node, 0)];
+	while let Some((node, depth)) = stack.pop() {
+		let is_named = include_unnamed || node.is_named();
+		if is_named {
+			let kind = node.kind();
+			let id_kind = lang.node_kind_for_id(node.kind_id()).unwrap_or("<unknown>");
+			let has_mismatch = kind != id_kind;
+			let color_kind = if node.is_error() {
+				Color::Red
+			}
+			else if node.is_missing() {
+				Color::Yellow
+			}
+			else if has_mismatch {
+				Color::Yellow
+			}
+			else {
+				Color::Cyan
+			};
+			let kind = color(kind, color_kind, false);
+			let kind = if has_mismatch {
+				let id_kind = color(id_kind, color_kind, false);
+				format!("{kind} (id: {id_kind})")
+			}
+			else {
+				kind
+			};
+			let id_text = color(&format!("#{}", node.kind_id()), Color::Gray, false);
+			let start = node.start_position();
+			let end = node.end_position();
+			let indent = "  ".repeat(depth);
+			println!(
+				"{indent}{kind} ({id_text}) [{}:{}..{}:{}] bytes {}..{}",
+				start.row + 1,
+				start.column + 1,
+				end.row + 1,
+				end.column + 1,
+				node.start_byte(),
+				node.end_byte()
+			);
+			counts.nodes += 1;
+			if node.is_error() {
+				counts.errors += 1;
+			}
+			if node.is_missing() {
+				counts.missing += 1;
+			}
+		}
+		let next_depth = if is_named {
+			depth + 1
+		}
+		else {
+			depth
+		};
+		let mut cursor = node.walk();
+		if cursor.goto_first_child() {
+			let mut children = Vec::new();
+			loop {
+				children.push(cursor.node());
+				if !cursor.goto_next_sibling() {
+					break;
+				}
+			}
+			for child in children.into_iter().rev() {
+				stack.push((child, next_depth));
+			}
+		}
+	}
 }
 
 pub(crate) fn format_source(
@@ -1194,7 +1449,9 @@ pub(crate) fn format_source(
 	engine.register_fn(
 		"setting",
 		move |key: &str, default: Dynamic| -> Dynamic {
-			settings_for_get.get(key).cloned().unwrap_or(default)
+			settings_for_get.get(key)
+				.cloned()
+				.unwrap_or(default)
 		}
 	);
 	let debug_enabled = debug;
@@ -1206,7 +1463,7 @@ pub(crate) fn format_source(
 			}
 		}
 	);
-	let ast = engine.compile_file(entry_path.to_path_buf()).map_err(|e| format!("compile error: {e}"))?;
+	let ast = compile_ast_cached(&engine, entry_path)?;
 	if strict {
 		let issues = ctx.parse_issues(language, 6)?;
 		if !issues.is_empty() {
@@ -1326,8 +1583,7 @@ pub(crate) fn format_fragment(
 		test_group,
 		strict
 	)?;
-	let start_idx = formatted.find(&start_marker)
-		.ok_or_else(|| "start marker not found after formatting".to_string())?;
+	let start_idx = formatted.find(&start_marker).ok_or_else(|| "start marker not found after formatting".to_string())?;
 	let after_start = start_idx + start_marker.len();
 	let end_idx = formatted[after_start..].find(&end_marker)
 		.map(|i| after_start + i)
@@ -1403,10 +1659,14 @@ fn collect_files_for_language(
 	let (ignore_set, use_gitignore) = build_ignore_set(&cwd, ignore_patterns)?;
 	let mut files = Vec::new();
 	let mut builder = WalkBuilder::new(&cwd);
-	builder.git_ignore(use_gitignore).git_exclude(use_gitignore).git_global(use_gitignore);
+	builder.git_ignore(use_gitignore)
+		.git_exclude(use_gitignore)
+		.git_global(use_gitignore);
 	for result in builder.build() {
 		let entry = result.map_err(|e| e.to_string())?;
-		if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+		if !entry.file_type()
+			.map(|t| t.is_file())
+			.unwrap_or(false) {
 			continue;
 		}
 		let path = entry.path();
@@ -1440,10 +1700,14 @@ fn collect_files_from_targets(
 		return Ok(files);
 	}
 	let mut builder = WalkBuilder::new(&cwd);
-	builder.git_ignore(use_gitignore).git_exclude(use_gitignore).git_global(use_gitignore);
+	builder.git_ignore(use_gitignore)
+		.git_exclude(use_gitignore)
+		.git_global(use_gitignore);
 	for result in builder.build() {
 		let entry = result.map_err(|e| e.to_string())?;
-		if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+		if !entry.file_type()
+			.map(|t| t.is_file())
+			.unwrap_or(false) {
 			continue;
 		}
 		let path = entry.path();
@@ -1452,7 +1716,9 @@ fn collect_files_from_targets(
 		}
 		if !target_set.is_empty() {
 			let rel = path.strip_prefix(&cwd).ok();
-			let rel_match = rel.and_then(|p| p.to_str()).map(|p| target_set.is_match(p)).unwrap_or(false);
+			let rel_match = rel.and_then(|p| p.to_str())
+				.map(|p| target_set.is_match(p))
+				.unwrap_or(false);
 			if !target_set.is_match(path) && !rel_match {
 				continue;
 			}
@@ -1484,7 +1750,9 @@ fn collect_files_all(
 		};
 		for (language, extensions) in specs.iter() {
 			if extensions.iter().any(|ext| path_str.ends_with(ext)) {
-				by_language.entry(language.clone()).or_default().push(path_str.to_string());
+				by_language.entry(language.clone())
+					.or_default()
+					.push(path_str.to_string());
 				break;
 			}
 		}
@@ -1497,10 +1765,14 @@ fn collect_files_all(
 		return Ok(by_language);
 	}
 	let mut builder = WalkBuilder::new(&cwd);
-	builder.git_ignore(use_gitignore).git_exclude(use_gitignore).git_global(use_gitignore);
+	builder.git_ignore(use_gitignore)
+		.git_exclude(use_gitignore)
+		.git_global(use_gitignore);
 	for result in builder.build() {
 		let entry = result.map_err(|e| e.to_string())?;
-		if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+		if !entry.file_type()
+			.map(|t| t.is_file())
+			.unwrap_or(false) {
 			continue;
 		}
 		let path = entry.path();
@@ -1509,7 +1781,9 @@ fn collect_files_all(
 		}
 		if !target_set.is_empty() {
 			let rel = path.strip_prefix(&cwd).ok();
-			let rel_match = rel.and_then(|p| p.to_str()).map(|p| target_set.is_match(p)).unwrap_or(false);
+			let rel_match = rel.and_then(|p| p.to_str())
+				.map(|p| target_set.is_match(p))
+				.unwrap_or(false);
 			if !target_set.is_match(path) && !rel_match {
 				continue;
 			}
@@ -1520,7 +1794,9 @@ fn collect_files_all(
 		};
 		for (language, extensions) in specs.iter() {
 			if extensions.iter().any(|ext| path_str.ends_with(ext)) {
-				by_language.entry(language.clone()).or_default().push(path_str.to_string());
+				by_language.entry(language.clone())
+					.or_default()
+					.push(path_str.to_string());
 				break;
 			}
 		}
@@ -1604,10 +1880,14 @@ fn collect_language_specs(roots: &[PathBuf]) -> Result<HashMap<String, Vec<Strin
 	let mut map: HashMap<String, Vec<String>> = HashMap::new();
 	for root in roots {
 		let mut builder = WalkBuilder::new(root);
-		builder.git_ignore(false).git_exclude(false).git_global(false);
+		builder.git_ignore(false)
+			.git_exclude(false)
+			.git_global(false);
 		for entry in builder.build() {
 			let entry = entry.map_err(|e| e.to_string())?;
-			if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+			if !entry.file_type()
+				.map(|t| t.is_file())
+				.unwrap_or(false) {
 				continue;
 			}
 			let path = entry.path();
@@ -1713,7 +1993,6 @@ fn run_tests(
 	repositories: &[RepositoryRecord],
 	language: Option<String>,
 	filters: &[String],
-	strict: bool,
 	reporter: &Reporter) -> Result<(), String> {
 	let overrides = parse_overrides(&cli.sets)?;
 	let roots = repository_roots(repositories);
@@ -1736,7 +2015,9 @@ fn run_tests(
 	let mut passed = 0usize;
 	let mut grouped: HashMap<String, Vec<TestCase>> = HashMap::new();
 	for test in tests.into_iter() {
-		grouped.entry(test.language.clone()).or_default().push(test);
+		grouped.entry(test.language.clone())
+			.or_default()
+			.push(test);
 	}
 	for (language, tests) in grouped.iter() {
 		let language_spec = resolve_language_spec(language, &roots)?;
@@ -1746,8 +2027,7 @@ fn run_tests(
 		let strict = false;
 		for test in tests.iter() {
 			let input = std::fs::read_to_string(&test.input).map_err(|e| format!("read {}: {e}", test.input.display()))?;
-			let expected = std::fs::read_to_string(&test.expected)
-				.map_err(|e| format!("read {}: {e}", test.expected.display()))?;
+			let expected = std::fs::read_to_string(&test.expected).map_err(|e| format!("read {}: {e}", test.expected.display()))?;
 			let formatted = match format_source(
 				&input,
 				&entry_path,
@@ -1990,12 +2270,11 @@ fn discover_tests_from_fs(
 					continue;
 				}
 				let expected_rel = rel.replace(&in_suffix, &format!(".out{ext}"));
-				let expected = set.get(&expected_rel)
-					.ok_or_else(
-						|| {
-							format!("missing expected test file: {expected_rel}")
-						}
-					)?;
+				let expected = set.get(&expected_rel).ok_or_else(
+					|| {
+						format!("missing expected test file: {expected_rel}")
+					}
+				)?;
 				let name = rel.clone();
 				tests.push(
 					TestCase {
@@ -2030,12 +2309,11 @@ fn discover_all_tests_from_fs(roots: &[PathBuf]) -> Result<Vec<TestCase>, String
 			}
 			let language = extract_language_from_test_path(rel)?;
 			let expected_rel = rel.replace(".in.", ".out.");
-			let expected = set.get(&expected_rel)
-				.ok_or_else(
-					|| {
-						format!("missing expected test file: {expected_rel}")
-					}
-				)?;
+			let expected = set.get(&expected_rel).ok_or_else(
+				|| {
+					format!("missing expected test file: {expected_rel}")
+				}
+			)?;
 			tests.push(
 				TestCase {
 					language,
@@ -2117,7 +2395,9 @@ fn is_hidden_path(path: &Path) -> bool {
 	path.components()
 		.any(
 			|comp| match comp {
-				std::path::Component::Normal(os) => os.to_str().map(|s| s.starts_with('.')).unwrap_or(false),
+				std::path::Component::Normal(os) => os.to_str()
+					.map(|s| s.starts_with('.'))
+					.unwrap_or(false),
 				_ => false,
 			}
 		)
@@ -2208,6 +2488,7 @@ enum Color {
 	Green,
 	Gray,
 	Yellow,
+	Cyan,
 }
 
 enum FormatStatus {
@@ -2266,8 +2547,7 @@ impl Reporter {
 		detail: Option<&str>,
 		contexts: Option<&[IssueContext]>) {
 		if self.is_human() {
-			let elapsed = elapsed.map(|d| color(&format_elapsed(d), Color::Gray, false))
-				.unwrap_or_else(|| "".to_string());
+			let elapsed = elapsed.map(|d| color(&format_elapsed(d), Color::Gray, false)).unwrap_or_else(|| "".to_string());
 			let status_text = match status {
 				FormatStatus::Updated => color("DONE", Color::Green, true),
 				FormatStatus::Unchanged => color("UNCHANGED", Color::Gray, false),
@@ -2502,10 +2782,12 @@ fn color(text: &str, color: Color, bold: bool) -> String {
 		(Color::Green, true) => "1;32",
 		(Color::Gray, true) => "1;90",
 		(Color::Yellow, true) => "1;33",
+		(Color::Cyan, true) => "1;36",
 		(Color::Red, false) => "31",
 		(Color::Green, false) => "32",
 		(Color::Gray, false) => "90",
 		(Color::Yellow, false) => "33",
+		(Color::Cyan, false) => "36",
 	};
 	format!("\x1b[{code}m{text}\x1b[0m")
 }
@@ -2544,8 +2826,12 @@ fn build_issue_contexts_from_issues(
 	let starts = line_starts(source);
 	let mut contexts = Vec::new();
 	for issue in issues.iter() {
-		let start_row = issue.position.row.min(starts.len().saturating_sub(1));
-		let end_row = issue.end_position.row.min(starts.len().saturating_sub(1));
+		let start_row = issue.position
+			.row
+			.min(starts.len().saturating_sub(1));
+		let end_row = issue.end_position
+			.row
+			.min(starts.len().saturating_sub(1));
 		let mut lines = Vec::new();
 		let row_start = start_row.min(end_row);
 		let row_end = start_row.max(end_row);
@@ -2559,13 +2845,17 @@ fn build_issue_contexts_from_issues(
 			};
 			let line_text = &source[line_start..line_end];
 			let highlight_start = if row == row_start {
-				issue.range.start.max(line_start)
+				issue.range
+					.start
+					.max(line_start)
 			}
 			else {
 				line_start
 			};
 			let highlight_end = if row == row_end {
-				issue.range.end.min(line_end)
+				issue.range
+					.end
+					.min(line_end)
 			}
 			else {
 				line_end
@@ -2574,7 +2864,9 @@ fn build_issue_contexts_from_issues(
 			let end_rel = highlight_end.saturating_sub(line_start).min(line_text.len());
 			let fallback_col = if row == start_row {
 				Some(
-					issue.position.col.min(line_text.len())
+					issue.position
+						.col
+						.min(line_text.len())
 				)
 			}
 			else {
@@ -2662,7 +2954,9 @@ fn build_marker(
 		}
 	}
 	let caret_count = if start < end {
-		line_text[start..end].chars().count().max(1)
+		line_text[start..end].chars()
+			.count()
+			.max(1)
 	}
 	else {
 		1
@@ -2720,7 +3014,9 @@ fn env_flag_enabled(key: &str) -> bool {
 }
 
 fn parse_bool_env(value: &str) -> Option<bool> {
-	match value.trim().to_ascii_lowercase().as_str() {
+	match value.trim()
+		.to_ascii_lowercase()
+		.as_str() {
 		"1" | "true" | "yes" | "on" => Some(true),
 		"0" | "false" | "no" | "off" => Some(false),
 		_ => None,

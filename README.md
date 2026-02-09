@@ -228,15 +228,3 @@ The `{os}` and `{arch}` folder names come from Rust's `std::env::consts::OS` and
 
 - `os`: `linux`, `macos`, `windows`
 - `arch`: `x86_64`, `aarch64`, `arm`, `i686`
-
-### Formatter Guarantees
-
-- Formatting is non-semantic: it preserves tokens and only changes whitespace/layout.
-- Embedded formatting (HTML -> CSS/JS) is handled by the HTML formatter, not by global detection.
-- Parse error handling: when Tree-sitter produces error or missing nodes, Neatify preserves the raw text for those ranges. With `--debug` enabled, it logs the affected ranges.
-
-### Formatter Internals (Brief)
-
-- Tree-sitter parses the AST.
-- Rhai formatter scripts build a document tree.
-- The document tree is rendered to final output.

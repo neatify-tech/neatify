@@ -97,7 +97,9 @@ impl <'a> DocPrinter<'a> {
 	fn render(mut self, doc_id: DocId) -> String {
 		let mut stack = vec![(doc_id, 0usize, PrintMode::Break)];
 		while let Some((id, indent, mode)) = stack.pop() {
-			if id >= self.arena.docs.len() {
+			if id >= self.arena
+				.docs
+				.len() {
 				continue;
 			}
 			match &self.arena.docs[id] {
@@ -169,7 +171,9 @@ impl <'a> DocPrinter<'a> {
 	fn fits(&self, doc_id: DocId, indent: usize, mut remaining: usize) -> bool {
 		let mut stack = vec![(doc_id, indent, PrintMode::Flat)];
 		while let Some((id, indent, mode)) = stack.pop() {
-			if id >= self.arena.docs.len() {
+			if id >= self.arena
+				.docs
+				.len() {
 				continue;
 			}
 			match &self.arena.docs[id] {
