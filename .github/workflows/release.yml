@@ -66,12 +66,12 @@ jobs:
         run: |
           set -euo pipefail
           version=$(python - <<'PY'
-import tomllib
-from pathlib import Path
-data = tomllib.loads(Path("Cargo.toml").read_text())
-print(data["package"]["version"])
-PY
-)
+            import tomllib
+            from pathlib import Path
+            data = tomllib.loads(Path("Cargo.toml").read_text())
+            print(data["package"]["version"])
+            PY
+          )
           os="${{ matrix.os_name }}"
           arch="${{ matrix.arch }}"
           bin_name="neatify"
