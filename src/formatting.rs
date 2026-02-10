@@ -111,7 +111,7 @@ pub fn resolve_language_spec(language: &str, roots: &[PathBuf]) -> Result<Langua
 		format!("{language}/language.toml")
 	}
 	else {
-		format!("core/{language}/language.toml")
+		format!("{language}/language.toml")
 	};
 	let spec_path = resolve_registry_path(&language_path, roots)
 		.ok_or_else(|| format!("language spec not found: {language_path}"))?;
@@ -527,10 +527,6 @@ impl RegistryModuleResolver {
 		let candidate = self.cwd.join(path);
 		if candidate.exists() {
 			return Some(candidate);
-		}
-		if path == "base.rhai" {
-			let fallback = "core/base.rhai";
-			return resolve_registry_path(fallback, &self.roots);
 		}
 		resolve_registry_path(path, &self.roots)
 	}

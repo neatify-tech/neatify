@@ -87,7 +87,7 @@ struct Cli {
 	/// Sync repository tests
 	#[arg(long = "sync-tests")]
 	sync_tests: bool,
-	/// Language spec (e.g., java, core/java)
+	/// Language spec (e.g., java)
 	#[arg(value_name = "LANG|FILE", num_args = 0..)]
 	targets: Vec<String>,
 	/// Read from stdin and write to stdout
@@ -209,6 +209,7 @@ fn main() {
 	if bootstrap_sync {
 		ensure_core_repository_config(&mut config, &cache_root).unwrap_or_else(|err| exit_with_error(&err));
 		write_config(&config_path, &config).unwrap_or_else(|err| exit_with_error(&err));
+		eprintln!("no repositories detected, syncing core repository...");
 		sync_repositories(&mut config, &cache_root, false).unwrap_or_else(|err| exit_with_error(&err));
 		write_config(&config_path, &config).unwrap_or_else(|err| exit_with_error(&err));
 	}
@@ -216,6 +217,9 @@ fn main() {
 	let repo_roots = repository_roots(&repositories);
 	let available_specs = collect_language_specs(&repo_roots).unwrap_or_else(|err| exit_with_error(&err));
 	if available_specs.is_empty() {
+		if config.repositories.is_empty() {
+			exit_with_error("no repositories synced yet; run `neatify --sync`");
+		}
 		exit_with_error("no language specs found; run `neatify --sync`");
 	}
 	let (language, file_targets) = resolve_language_targets(&cli.targets, &repo_roots).unwrap_or_else(|err| exit_with_error(&err));
@@ -533,10 +537,12 @@ fn sync_repositories(
 		let Some(url) = entry.url.clone() else {
 			continue;
 		};
+		eprintln!("syncing {}...", entry.name);
 		let manifest = fetch_manifest_from_url(&url)?;
 		if let Some(version) = manifest.version.as_ref() {
 			let current = entry.version.clone();
 			if current.as_ref() == Some(version) {
+				eprintln!("{} is up to date ({})", entry.name, version);
 				entry.last_checked = Some(now_timestamp());
 				continue;
 			}
@@ -545,7 +551,7 @@ fn sync_repositories(
 				continue;
 			}
 		}
-		sync_repository(&repo_root, &url, &manifest, &cache, sync_tests)?;
+		sync_repository(&entry.name, &repo_root, &url, &manifest, &cache, sync_tests)?;
 		entry.version = manifest.version.clone();
 		entry.last_checked = Some(now_timestamp());
 		entry.last_synced = Some(now_timestamp());
@@ -554,6 +560,7 @@ fn sync_repositories(
 }
 
 fn sync_repository(
+	name: &str,
 	repo_root: &Path,
 	url: &str,
 	manifest: &Manifest,
@@ -562,6 +569,11 @@ fn sync_repository(
 	let mut manifest = manifest.clone();
 	manifest.sort_by_path();
 	write_manifest_toml(&manifest, &cache.manifest_path(repo_root))?;
+	let total_files = manifest.files
+		.iter()
+		.filter(|entry| sync_tests || !is_test_path(&entry.path))
+		.count();
+	let mut downloaded = 0usize;
 	for entry in manifest.files.iter() {
 		if !sync_tests && is_test_path(&entry.path) {
 			continue;
@@ -573,6 +585,8 @@ fn sync_repository(
 				continue;
 			}
 		}
+		downloaded += 1;
+		eprintln!("{} {}/{}: {}", name, downloaded, total_files, entry.path);
 		if let Some(parent) = dest.parent() {
 			std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
 		}
@@ -603,9 +617,10 @@ fn fetch_manifest_from_url(url: &str) -> Result<Manifest, String> {
 	let toml_url = format!("{base}/manifest.toml");
 	match fetch_url_string(&toml_url) {
 		Ok(text) => parse_manifest(&text, ManifestFormat::Toml),
-		Err(_) => {
+		Err(toml_err) => {
 			let json_url = format!("{base}/manifest.json");
-			let text = fetch_url_string(&json_url)?;
+			let text = fetch_url_string(&json_url)
+				.map_err(|json_err| format!("failed to fetch manifest: {toml_err}; {json_err}"))?;
 			parse_manifest(&text, ManifestFormat::Json)
 		}
 	}
@@ -635,7 +650,7 @@ fn add_core_repository_config(config: &mut NeatifyConfig, cache_root: &str) -> R
 		.any(|repo| repo.name == "core") {
 		return Ok(());
 	}
-	let core_url = "https://example.com/neatify/core";
+	let core_url = "https://neatify-tech.github.io/repository";
 	let repo_root = Path::new(cache_root).join("core");
 	std::fs::create_dir_all(&repo_root).map_err(|e| format!("create {}: {e}", repo_root.display()))?;
 	config.repositories
@@ -681,7 +696,7 @@ fn resolve_language_spec(language: &str, roots: &[PathBuf]) -> Result<LanguageSp
 		format!("{language}/language.toml")
 	}
 	else {
-		format!("core/{language}/language.toml")
+		format!("{language}/language.toml")
 	};
 	let spec_path = resolve_registry_path(&language_path, roots)
 		.ok_or_else(|| format!("language spec not found: {language_path}"))?;
@@ -1956,10 +1971,6 @@ impl RegistryModuleResolver {
 		let candidate = self.cwd.join(path);
 		if candidate.exists() {
 			return Some(candidate);
-		}
-		if path == "base.rhai" {
-			let fallback = "core/base.rhai";
-			return resolve_registry_path(fallback, &self.roots);
 		}
 		resolve_registry_path(path, &self.roots)
 	}
