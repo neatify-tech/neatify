@@ -222,7 +222,7 @@ fn main() {
 		}
 		exit_with_error("no language specs found; run `neatify --sync`");
 	}
-	let (language, file_targets) = resolve_language_targets(&cli.targets, &repo_roots).unwrap_or_else(|err| exit_with_error(&err));
+	let (language, file_targets) = resolve_language_targets(&cli.targets, &repositories).unwrap_or_else(|err| exit_with_error(&err));
 	if cli.lint {
 		if cli.test {
 			exit_with_error("--lint cannot be combined with --test");
@@ -232,7 +232,7 @@ fn main() {
 		}
 		run_lint(
 			&config,
-			&repo_roots,
+			&repositories,
 			language.clone(),
 			&file_targets,
 			strict,
@@ -251,15 +251,23 @@ fn main() {
 		let Some(language) = language.as_ref() else {
 			exit_with_error("--list-nodes requires a language");
 		};
-		let language_spec = resolve_language_spec(language, &repo_roots).unwrap_or_else(|err| exit_with_error(&err));
-		list_language_nodes(&language_spec, &repo_roots).unwrap_or_else(|err| exit_with_error(&err));
+		let (language_name, language_roots) = resolve_language_roots(language, &repositories).unwrap_or_else(|err| exit_with_error(&err));
+		let language_spec = resolve_language_spec(&language_name, &language_roots).unwrap_or_else(|err| exit_with_error(&err));
+		list_language_nodes(&language_spec, &language_roots).unwrap_or_else(|err| exit_with_error(&err));
 		return;
 	}
 	if cli.dump_tree {
+		let (language_name, language_roots) = if let Some(language) = language.as_ref() {
+			let (name, roots) = resolve_language_roots(language, &repositories).unwrap_or_else(|err| exit_with_error(&err));
+			(Some(name), roots)
+		}
+		else {
+			(None, repo_roots.clone())
+		};
 		dump_trees(
 			&config,
-			&repo_roots,
-			language.as_ref(),
+			&language_roots,
+			language_name.as_deref(),
 			&file_targets,
 			range.as_ref(),
 			cli.stdin
@@ -274,8 +282,9 @@ fn main() {
 		if cli.stdin || !file_targets.is_empty() || cli.stdout || range.is_some() {
 			exit_with_error("--lsp cannot be combined with file/stdin/range flags");
 		}
-		let language_spec = resolve_language_spec(language, &repo_roots).unwrap_or_else(|err| exit_with_error(&err));
-		lsp::run_lsp(language_spec, repo_roots, overrides, cli.debug, test_group_env, strict)
+		let (language_name, language_roots) = resolve_language_roots(language, &repositories).unwrap_or_else(|err| exit_with_error(&err));
+		let language_spec = resolve_language_spec(&language_name, &language_roots).unwrap_or_else(|err| exit_with_error(&err));
+		lsp::run_lsp(language_spec, language_roots, overrides, cli.debug, test_group_env, strict)
 			.unwrap_or_else(|err| exit_with_error(&err));
 		return;
 	}
@@ -283,10 +292,11 @@ fn main() {
 		let Some(language) = language.as_ref() else {
 			exit_with_error("--stdin requires a language");
 		};
-		let language_spec = resolve_language_spec(language, &repo_roots).unwrap_or_else(|err| exit_with_error(&err));
+		let (language_name, language_roots) = resolve_language_roots(language, &repositories).unwrap_or_else(|err| exit_with_error(&err));
+		let language_spec = resolve_language_spec(&language_name, &language_roots).unwrap_or_else(|err| exit_with_error(&err));
 		format_stdin(
 			&language_spec,
-			&repo_roots,
+			&language_roots,
 			range.as_ref(),
 			&overrides,
 			cli.debug,
@@ -299,7 +309,8 @@ fn main() {
 		return;
 	}
 	if let Some(language) = language.as_ref() {
-		let language_spec = resolve_language_spec(language, &repo_roots).unwrap_or_else(|err| exit_with_error(&err));
+		let (language_name, language_roots) = resolve_language_roots(language, &repositories).unwrap_or_else(|err| exit_with_error(&err));
+		let language_spec = resolve_language_spec(&language_name, &language_roots).unwrap_or_else(|err| exit_with_error(&err));
 		let files = if file_targets.is_empty() {
 			collect_files_for_language(&language_spec.extensions, &config.ignore)
 				.unwrap_or_else(|err| exit_with_error(&err))
@@ -313,7 +324,7 @@ fn main() {
 		let mut summary = FormatSummary::new();
 		let mut runner = FormatRunner::new(
 			&language_spec,
-			&repo_roots,
+			&language_roots,
 			&overrides,
 			cli.debug,
 			cli.profile,
@@ -704,6 +715,24 @@ fn resolve_language_spec(language: &str, roots: &[PathBuf]) -> Result<LanguageSp
 		.map_err(|e| format!("failed to read {}: {e}", spec_path.display()))?;
 	let spec: LanguageSpec = toml::from_str(&content).map_err(|e| format!("invalid language spec {}: {e}", spec_path.display()))?;
 	Ok(spec)
+}
+
+fn split_language_namespace(language: &str) -> Option<(&str, &str)> {
+	language.split_once('/')
+}
+
+fn find_repository<'a>(repositories: &'a [RepositoryRecord], name: &str) -> Result<&'a RepositoryRecord, String> {
+	repositories.iter()
+		.find(|repo| repo.name == name)
+		.ok_or_else(|| format!("repository not found: {name}"))
+}
+
+fn resolve_language_roots(language: &str, repositories: &[RepositoryRecord]) -> Result<(String, Vec<PathBuf>), String> {
+	if let Some((namespace, name)) = split_language_namespace(language) {
+		let repo = find_repository(repositories, namespace)?;
+		return Ok((name.to_string(), vec![repo.root.clone()]));
+	}
+	Ok((language.to_string(), repository_roots(repositories)))
 }
 
 fn resolve_registry_path(path: &str, roots: &[PathBuf]) -> Option<PathBuf> {
@@ -1264,7 +1293,7 @@ struct DumpTreeCounts {
 fn dump_trees(
 	config: &NeatifyConfig,
 	roots: &[PathBuf],
-	language: Option<&String>,
+	language: Option<&str>,
 	file_targets: &[String],
 	range: Option<&RangeSpec>,
 	stdin: bool) -> Result<(), String> {
@@ -1922,13 +1951,15 @@ fn collect_language_specs(roots: &[PathBuf]) -> Result<HashMap<String, Vec<Strin
 
 fn resolve_language_targets(
 	targets: &[String],
-	roots: &[PathBuf]) -> Result<(Option<String>, Vec<String>), String> {
+	repositories: &[RepositoryRecord]) -> Result<(Option<String>, Vec<String>), String> {
 	if targets.is_empty() {
 		return Ok((None, Vec::new()));
 	}
 	let first = &targets[0];
-	if resolve_language_spec(first, roots).is_ok() {
-		return Ok((Some(first.clone()), targets[1..].to_vec()));
+	if let Ok((language_name, roots)) = resolve_language_roots(first, repositories) {
+		if resolve_language_spec(&language_name, &roots).is_ok() {
+			return Ok((Some(first.clone()), targets[1..].to_vec()));
+		}
 	}
 	Ok((None, targets.to_vec()))
 }
@@ -2006,17 +2037,42 @@ fn run_tests(
 	filters: &[String],
 	reporter: &Reporter) -> Result<(), String> {
 	let overrides = parse_overrides(&cli.sets)?;
-	let roots = repository_roots(repositories);
-	if roots.is_empty() {
+	if repositories.is_empty() {
 		return Err("no repository roots available".to_string());
 	}
 	let tests = if let Some(language) = language.as_ref() {
-		let (namespace, name) = language_namespace_and_name(language);
-		let language_spec = resolve_language_spec(language, &roots)?;
-		discover_tests_from_fs(&roots, &namespace, &name, &language_spec.extensions)?
+		if let Some((namespace, name)) = split_language_namespace(language) {
+			let repo = find_repository(repositories, namespace)?;
+			let roots = vec![repo.root.clone()];
+			let language_spec = resolve_language_spec(name, &roots)?;
+			discover_tests_from_fs(&repo.root, namespace, name, &language_spec.extensions)?
+		}
+		else {
+			let mut tests = Vec::new();
+			let mut found = false;
+			for repo in repositories {
+				let roots = vec![repo.root.clone()];
+				let language_spec = match resolve_language_spec(language, &roots) {
+					Ok(spec) => spec,
+					Err(_) => continue
+				};
+				found = true;
+				let mut repo_tests = discover_tests_from_fs(
+					&repo.root,
+					&repo.name,
+					language,
+					&language_spec.extensions
+				)?;
+				tests.append(&mut repo_tests);
+			}
+			if !found {
+				return Err(format!("language spec not found: {language}/language.toml"));
+			}
+			tests
+		}
 	}
 	else {
-		discover_all_tests_from_fs(&roots)?
+		discover_all_tests_from_fs(repositories)?
 	};
 	let tests = filter_tests(tests, filters)?;
 	if tests.is_empty() {
@@ -2031,7 +2087,10 @@ fn run_tests(
 			.push(test);
 	}
 	for (language, tests) in grouped.iter() {
-		let language_spec = resolve_language_spec(language, &roots)?;
+		let (namespace, name) = split_language_namespace(language).ok_or_else(|| format!("invalid test language: {language}"))?;
+		let repo = find_repository(repositories, namespace)?;
+		let roots = vec![repo.root.clone()];
+		let language_spec = resolve_language_spec(name, &roots)?;
 		let entry_path = resolve_entry_path(&language_spec.formatter, &roots)
 			.ok_or_else(|| format!("formatter script not found: {}", language_spec.formatter))?;
 		let binary_path = resolve_treesitter_binary(&language_spec.treesitter.binary, &roots)?;
@@ -2103,7 +2162,7 @@ fn run_tests(
 
 fn run_lint(
 	config: &NeatifyConfig,
-	repo_roots: &[PathBuf],
+	repositories: &[RepositoryRecord],
 	language: Option<String>,
 	file_targets: &[String],
 	strict: bool,
@@ -2111,7 +2170,8 @@ fn run_lint(
 	let mut total_errors = 0usize;
 	let mut summary = LintSummary::new();
 	if let Some(language) = language.as_ref() {
-		let language_spec = resolve_language_spec(language, repo_roots)?;
+		let (language_name, roots) = resolve_language_roots(language, repositories)?;
+		let language_spec = resolve_language_spec(&language_name, &roots)?;
 		let files = if file_targets.is_empty() {
 			collect_files_for_language(&language_spec.extensions, &config.ignore)?
 		}
@@ -2121,18 +2181,19 @@ fn run_lint(
 		if files.is_empty() {
 			return Err("no files found".to_string());
 		}
-		let result = lint_language_files(&language_spec, repo_roots, &files, strict, reporter)?;
+		let result = lint_language_files(&language_spec, &roots, &files, strict, reporter)?;
 		total_errors += result.errors;
 		summary.add(&result.summary);
 	}
 	else {
-		let files_by_language = collect_files_all(repo_roots, &config.ignore, file_targets)?;
+		let repo_roots = repository_roots(repositories);
+		let files_by_language = collect_files_all(&repo_roots, &config.ignore, file_targets)?;
 		if files_by_language.is_empty() {
 			return Err("no files found".to_string());
 		}
 		for (language, files) in files_by_language.iter() {
-			let language_spec = resolve_language_spec(language, repo_roots)?;
-			let result = lint_language_files(&language_spec, repo_roots, files, strict, reporter)?;
+			let language_spec = resolve_language_spec(language, &repo_roots)?;
+			let result = lint_language_files(&language_spec, &repo_roots, files, strict, reporter)?;
 			total_errors += result.errors;
 			summary.add(&result.summary);
 		}
@@ -2210,22 +2271,13 @@ struct TestCase {
 	expected: PathBuf,
 }
 
-fn language_namespace_and_name(language: &str) -> (String, String) {
-	if let Some((ns, name)) = language.split_once('/') {
-		(ns.to_string(), name.to_string())
-	}
-	else {
-		("core".to_string(), language.to_string())
-	}
-}
-
 fn extract_language_from_test_path(path: &str) -> Result<String, String> {
 	if let Some(idx) = path.find("/tests/") {
 		let prefix = &path[..idx];
-		if let Some((namespace, language)) = prefix.split_once('/') {
-			return Ok(format!("{namespace}/{language}"));
+		if prefix.is_empty() {
+			return Err(format!("invalid test path: {path}"));
 		}
-		return Err(format!("invalid test path: {path}"));
+		return Ok(prefix.to_string());
 	}
 	Err(format!("invalid test path: {path}"))
 }
@@ -2258,53 +2310,52 @@ fn filter_tests(tests: Vec<TestCase>, filters: &[String]) -> Result<Vec<TestCase
 }
 
 fn discover_tests_from_fs(
-	roots: &[PathBuf],
+	root: &Path,
 	namespace: &str,
 	language: &str,
 	extensions: &[String]) -> Result<Vec<TestCase>, String> {
-	let tests_prefix = format!("{namespace}/{language}/tests/");
+	let tests_prefix = format!("{language}/tests/");
+	let files = collect_registry_files(root)?;
+	let mut set = HashMap::new();
+	for file in files.iter() {
+		let rel = registry_relative_path(root, file)?;
+		set.insert(rel.clone(), file.clone());
+	}
 	let mut tests = Vec::new();
-	for root in roots {
-		let files = collect_registry_files(root)?;
-		let mut set = HashMap::new();
-		for file in files.iter() {
-			let rel = registry_relative_path(root, file)?;
-			set.insert(rel.clone(), file.clone());
+	for (rel, path) in set.iter() {
+		if !rel.starts_with(&tests_prefix) {
+			continue;
 		}
-		for (rel, path) in set.iter() {
-			if !rel.starts_with(&tests_prefix) {
+		for ext in extensions {
+			let in_suffix = format!(".in{ext}");
+			if !rel.ends_with(&in_suffix) {
 				continue;
 			}
-			for ext in extensions {
-				let in_suffix = format!(".in{ext}");
-				if !rel.ends_with(&in_suffix) {
-					continue;
+			let expected_rel = rel.replace(&in_suffix, &format!(".out{ext}"));
+			let expected = set.get(&expected_rel).ok_or_else(
+				|| {
+					format!("missing expected test file: {expected_rel}")
 				}
-				let expected_rel = rel.replace(&in_suffix, &format!(".out{ext}"));
-				let expected = set.get(&expected_rel).ok_or_else(
-					|| {
-						format!("missing expected test file: {expected_rel}")
-					}
-				)?;
-				let name = rel.clone();
-				tests.push(
-					TestCase {
-						language: format!("{namespace}/{language}"),
-						name,
-						input: path.clone(),
-						expected: expected.clone()
-					}
-				);
-			}
+			)?;
+			let name = format!("{namespace}/{rel}");
+			tests.push(
+				TestCase {
+					language: format!("{namespace}/{language}"),
+					name,
+					input: path.clone(),
+					expected: expected.clone()
+				}
+			);
 		}
 	}
 	tests.sort_by(|a, b| a.name.cmp(&b.name));
 	Ok(tests)
 }
 
-fn discover_all_tests_from_fs(roots: &[PathBuf]) -> Result<Vec<TestCase>, String> {
+fn discover_all_tests_from_fs(repositories: &[RepositoryRecord]) -> Result<Vec<TestCase>, String> {
 	let mut tests = Vec::new();
-	for root in roots {
+	for repo in repositories {
+		let root = &repo.root;
 		let files = collect_registry_files(root)?;
 		let mut set = HashMap::new();
 		for file in files.iter() {
@@ -2327,8 +2378,8 @@ fn discover_all_tests_from_fs(roots: &[PathBuf]) -> Result<Vec<TestCase>, String
 			)?;
 			tests.push(
 				TestCase {
-					language,
-					name: rel.clone(),
+					language: format!("{}/{}", repo.name, language),
+					name: format!("{}/{}", repo.name, rel),
 					input: path.clone(),
 					expected: expected.clone()
 				}
