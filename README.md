@@ -1,26 +1,17 @@
 # Neatify
 
-In the age of AI generated code, it is much easier to be a prolific polyglot then ever before because its rarely about knowing the actual syntax anymore.
-That means however, keeping everything formatted consistently has become more of a challenge. And I do believe a clean format helps with human understanding.
+In the age of AI-generated code, it’s easier than ever to be a prolific polyglot. When you’re jumping between five different languages a day, the challenge isn't the syntax—it's maintaining consistency across fragmented ecosystems.
 
-This project has a number of goals:
+Most formatters are either limited to a handful of languages or are so opinionated that you’re stuck with their "one true way."
 
-- support as many syntaxes as possible: it is based on tree-sitter so anything supported there can be formatted
-- support as many formatting styles as possible: instead of reducing formatting choices to a limited number of configuration options, it is entirely scriptable, allowing from small variations to full blown rewrites without touching the core. You can install multiple repositories that offer entirely different formatting results or if you're adventurous enough: write your own.
+**Neatify** was built to solve this. It is a universal, scriptable formatting and linting engine designed for a world where code moves fast.
 
-In the spirit of this new age, I created this project in a language I never used (rust) and a language I hadn't even heard of (rhai).
-As you can imagine, the codebase is pretty much all AI generated though with heavy coordination, targetted manual intervention and no small amount of frustration.
+### Why Neatify?
 
-## Steps
-
-A formatting round starts by parsing the document into an AST. By default the parse is strict which means error or missing will abort further formatting, though this can be circumvented by --lax.
-
-Once we have an AST, depending on the repository used and the language, a formatter is picked.
-The formatter chooses the nodes its interested in through tree-sitter queries. These nodes are captured. Any ancestor nodes not explicitly captured are set as marked.
-
-Rust will walk depth first over the captured nodes and will use rhai scripts to build pretty printer docs that will eventually be formatted into the new result.
-
-Neatify also comes with an optional linting stage, by default we report error/missing problems in the AST but dedicated lint scripts can be added as well. Use --lint to run it (no formatting then), use --inspect if you want more details (though a bit more overhead) and --lax if you want to do an internal linting stage even if the document contains an error or has missing pieces.
+* **Tree-sitter Powered:** If a Tree-sitter grammar exists for a language, Neatify can format and lint it.
+* **Scriptable (Rhai):** Formatting rules aren't hidden in a JSON file; they are live scripts. You have total control over the "opinion" of the formatter.
+* **Repository First:** Switch between entirely different style repositories seamlessly. Use the community standard, or fork one to create your own "flavor."
+* **AI-Native Workflow:** I built this project using Rust and Rhai—languages I was unfamiliar with—by coordinating with AI. Because the formatting logic is scripted in Rhai, you can easily use an LLM to "describe" a formatting style and have it generate the Neatify script for you.
 
 ## Getting Started
 
@@ -30,15 +21,13 @@ Typical usage (no custom repos):
 neatify
 ```
 
+On first run -if you haven't added an explicit repository- Neatify adds the core repository to `~/.neatify/config.toml` and syncs it automatically. After that, running `neatify` formats all supported files in the current directory (recursive), based on file extensions.
+
 See all options:
 
 ```bash
 neatify --help
 ```
-
-On first run, Neatify adds the core repository to `~/.neatify/config.toml` and syncs it automatically. After that, running `neatify` formats all supported files in the current directory (recursive), based on file extensions.
-
-File-level detection only. If a formatter (like HTML) embeds other languages, it can dispatch internally.
 
 ### Format a Single Language
 
@@ -123,6 +112,8 @@ Local repositories do not have a `url` and are never polled during `--sync`.
 
 ## Testing
 
+The formatters are tested with a list of testcases where we have an "in" and "out" file.
+
 Run tests for all locally available languages:
 
 ```bash
@@ -137,68 +128,6 @@ neatify --test java
 
 Tests are only run if they exist locally. Use `--sync-tests` to download them for remote repositories.
 
-## Technical Details
-
-### Sync Behavior
-
-- On first run, Neatify adds the core repository to `~/.neatify/config.toml` and runs a sync.
-- `--sync` only polls repositories with a `url` set. Local repos are never polled.
-- Updates are prompted per repository (versioned manifests when available).
-
-### Registry Hosting
-
-Repositories are served as static registries (e.g., GitHub Pages) with a manifest at the root:
-
-- `manifest.toml` (preferred) or `manifest.json`
-- Each file entry includes path, sha256, and size
-
-Tree-sitter binaries are stored alongside the repository under (in this repo, the directory is `registry/`):
-
-```
-repository/core/treesitter/<os>/<arch>/<language>.{ext}
-```
-
-### Manifest Generation
-
-Generate a manifest for the local cache root:
-
-```bash
-neatify --generate-manifest
-```
-
-Generate a manifest for a named repository or a direct path:
-
-```bash
-neatify --manifest-generate core
-neatify --manifest-generate /path/to/repo
-neatify --manifest-generate file:/path/to/repo
-```
-
-Notes:
-
-- `--manifest-generate` refuses repositories with a `url` (externally managed).
-- If no repository name matches, Neatify treats the argument as a path.
-- Manifest entries are sorted alphabetically to keep diffs small.
-
-### LSP Mode
-
-Neatify can run as an LSP server over stdio:
-
-```bash
-neatify java --lsp
-```
-
-Supports document formatting and range formatting only.
-
-### Tree-sitter Binaries
-
-Neatify uses Tree-sitter grammars as native shared libraries. These must be built per OS/arch.
-
-Versions:
-
-- Tree-sitter runtime: `0.26.5` (Rust crate)
-- Tree-sitter CLI for generating parser.c: `0.26.3`
-
 #### Build a grammar (Linux example)
 
 ```bash
@@ -207,6 +136,8 @@ cd tree-sitter-java
 tree-sitter generate
 cc -fPIC -shared -o java.so src/parser.c src/scanner.c -I src
 ```
+
+The tree-sitter CLI version used for generating parser.c: `0.26.3`.
 
 General rebuild steps:
 
