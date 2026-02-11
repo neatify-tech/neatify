@@ -60,7 +60,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version=$(python -c "import tomllib; from pathlib import Path; data = tomllib.loads(Path('Cargo.toml').read_text()); print(data['package']['version'])")
+          version="${GITHUB_REF_NAME}"
           os="${{ matrix.os_name }}"
           arch="${{ matrix.arch }}"
           bin_name="neatify"
@@ -68,12 +68,12 @@ jobs:
           if [[ "$os" == "windows" ]]; then
             bin_ext=".exe"
           fi
-          mkdir -p dist
-          cp "target/${{ matrix.target }}/release/${bin_name}${bin_ext}" "dist/${bin_name}${bin_ext}"
+          mkdir -p dist package
+          cp "target/${{ matrix.target }}/release/${bin_name}${bin_ext}" "package/${bin_name}${bin_ext}"
           if [[ "$os" == "windows" ]]; then
-            powershell -NoProfile -Command "Compress-Archive -Path dist/${bin_name}${bin_ext} -DestinationPath dist/${bin_name}-${version}-${os}-${arch}.zip"
+            powershell -NoProfile -Command "Compress-Archive -Path package/${bin_name}${bin_ext} -DestinationPath dist/${bin_name}-${version}-${os}-${arch}.zip"
           else
-            tar -czf "dist/${bin_name}-${version}-${os}-${arch}.tar.gz" -C dist "${bin_name}${bin_ext}"
+            tar -czf "dist/${bin_name}-${version}-${os}-${arch}.tar.gz" -C package "${bin_name}${bin_ext}"
           fi
       - name: Upload release assets
         if: ${{ github.event_name == 'release' }}
