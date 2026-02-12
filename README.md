@@ -6,14 +6,64 @@ Most formatters are either limited to a handful of languages or are so opinionat
 
 **Neatify** was built to solve this. It is a universal, scriptable formatting and linting engine designed for a world where code moves fast.
 
-### Why Neatify?
+## Why Neatify?
 
 * **Tree-sitter Powered:** If a Tree-sitter grammar exists for a language, Neatify can format and lint it.
 * **Scriptable (Rhai):** Formatting rules aren't hidden in a JSON file; they are live scripts. You have total control over the "opinion" of the formatter.
 * **Repository First:** Switch between entirely different style repositories seamlessly. Use the community standard, or fork one to create your own "flavor."
 * **AI-Native Workflow:** I built this project using Rust and Rhai—languages I was unfamiliar with—by coordinating with AI. Because the formatting logic is scripted in Rhai, you can easily use an LLM to "describe" a formatting style and have it generate the Neatify script for you.
 
-## Getting Started
+# Scriptable formatting
+
+For those who want to build their own formatters, here is a small example of what such a script might look like:
+
+```rust
+fn doc_if_expression(node) {
+	// find specific parts of the AST
+	let hits = node.find([
+		#{ kind_id: kinds::block },
+		#{ kind_id: kinds::else_clause },
+		#{ exclude_kind_id: kinds::kw_if, before_kind_id: kinds::block }
+	]);
+	// with no "mode" defined for the queries, the default is "first" which means the result contains a singular node
+	// the results are returned in the order of the queries
+	let block_node = hits[0];
+	let else_node = hits[1];
+	let cond_node = hits[2];
+	if block_node == () || cond_node == () {
+		return doc_text(text(node));
+	}
+	let block_doc = doc_for_node_or_range(block_node);
+	let cond_doc = doc_for_node_or_range(cond_node);
+	if else_node != () {
+		let else_doc = doc_for_node_or_range(else_node);
+		return doc_concat_list([
+			doc_text("if "),
+			cond_doc,
+			doc_text(" "),
+			block_doc,
+			doc_hardline(),
+			else_doc
+		]);
+	}
+	doc_concat_list([doc_text("if "), cond_doc, doc_text(" "), block_doc])
+}
+```
+
+# Status & Roadmap
+
+Neatify is currently in Beta. It is a "self-hosted" project: the formatters for Rust and Rhai were built and refined by formatting Neatify's own source code.
+
+⚠️ Important: Neatify is still in active development. While you can use --stdout to preview changes without modifying files, the default behavior is to modify source code in place. At this stage, I strongly recommend a "Commit-First" workflow so you can easily rollback changes if an edge case is handled unexpectedly.
+
+Roadmap:
+
+- **Coverage**: Gradually increasing edge-case coverage for the current language suite (the "long tail" of formatting).
+- **Performance:** I've already spent quite a bit of time finetuning performance but I believe there are still some gains to be made.
+- **LSP:** there is some initial support for LSP but it needs to be fleshed out
+- **Linting:** Expanding the logic library to include more out-of-the-box linting rules beyond basic formatting.
+
+# Getting Started
 
 Typical usage (no custom repos):
 
@@ -29,7 +79,7 @@ See all options:
 neatify --help
 ```
 
-### Format a Single Language
+## Format a Single Language
 
 ```bash
 neatify java
@@ -42,11 +92,11 @@ You can also pass globs or explicit files:
 neatify "src/**/*.ts" "web/**/*.html"
 ```
 
-### Ignore Files
+## Ignore Files
 
 Neatify respects `.gitignore` by default and also reads `.neatifyignore` (same syntax). You can add additional ignore patterns to `~/.neatify/config.toml`.
 
-## Repositories
+# Repositories
 
 Repositories are listed in `~/.neatify/config.toml` in priority order (top to bottom). The first repo that contains a language spec wins, with fallback to later repos.
 
@@ -87,7 +137,7 @@ Sync tests as well:
 neatify --sync-tests
 ```
 
-### Config File
+## Config File
 
 Example `~/.neatify/config.toml`:
 
@@ -110,7 +160,7 @@ ignore = [
 
 Local repositories do not have a `url` and are never polled during `--sync`.
 
-## Testing
+# Testing
 
 The formatters are tested with a list of testcases where we have an "in" and "out" file.
 
@@ -128,7 +178,7 @@ neatify --test java
 
 Tests are only run if they exist locally. Use `--sync-tests` to download them for remote repositories.
 
-#### Build a grammar (Linux example)
+# Build a grammar (Linux example)
 
 ```bash
 git clone --depth 1 https://github.com/tree-sitter/tree-sitter-java
