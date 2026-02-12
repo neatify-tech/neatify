@@ -1,3 +1,4 @@
+use crate::api::{FindMode, FindResult, FindSpec};
 use crate::{formatting, Context, Line, Match, NodeRef, Position, Range};
 use rhai::{Array, Dynamic, Engine, EvalAltResult, FnPtr, ImmutableString, Map, NativeCallContext, INT};
 use std::cell::RefCell;
@@ -120,6 +121,35 @@ fn int_to_usize(value: INT, label: &str) -> RhaiResult<usize> {
 		return Err(format!("{label} must be >= 0").into());
 	}
 	Ok(value as usize)
+}
+
+fn parse_find_mode(value: &str) -> RhaiResult<FindMode> {
+	match value {
+		"first" => Ok(FindMode::First),
+		"last" => Ok(FindMode::Last),
+		"all" => Ok(FindMode::All),
+		_ => Err("find mode must be 'first', 'last', or 'all'".into()),
+	}
+}
+
+fn parse_kind_id(value: Dynamic, label: &str) -> RhaiResult<u16> {
+	let kind_id = value.try_cast::<INT>().ok_or_else(|| format!("{label} expects integer"))?;
+	if kind_id < 0 || kind_id > u16::MAX as INT {
+		return Err(format!("{label} out of range").into());
+	}
+	Ok(kind_id as u16)
+}
+
+fn parse_kind_id_list(value: Dynamic, label: &str) -> RhaiResult<Vec<u16>> {
+	if let Some(kind_id) = value.clone().try_cast::<INT>() {
+		return Ok(vec![parse_kind_id(Dynamic::from_int(kind_id), label)?]);
+	}
+	let list = value.clone().try_cast::<Array>().ok_or_else(|| format!("{label} expects integer or array"))?;
+	let mut out = Vec::with_capacity(list.len());
+	for item in list {
+		out.push(parse_kind_id(item, label)?);
+	}
+	Ok(out)
 }
 
 fn matches_to_array(matches: Vec<Match>) -> Array {
@@ -1179,12 +1209,9 @@ pub fn register_primitives(engine: &mut Engine, ctx: Context) {
 		}
 	);
 	let ctx_len = ctx.clone();
-	engine.register_fn(
-		"source_len",
-		move || -> INT {
-			ctx_len.source_len() as INT
-		}
-	);
+	engine.register_fn("source_len", move || -> INT {
+		ctx_len.source_len() as INT
+	});
 	let ctx_cache_get = ctx.clone();
 	engine.register_fn(
 		"cache_get",
@@ -1316,18 +1343,12 @@ pub fn register_primitives(engine: &mut Engine, ctx: Context) {
 			walk_impl(&ctx_walk_opts, ctx_call, language, queries, rule, rewrite)
 		}
 	);
-	engine.register_fn(
-		"start",
-		|range: &mut Range| -> INT {
-			range.start as INT
-		}
-	);
-	engine.register_fn(
-		"end",
-		|range: &mut Range| -> INT {
-			range.end as INT
-		}
-	);
+	engine.register_fn("start", |range: &mut Range| -> INT {
+		range.start as INT
+	});
+	engine.register_fn("end", |range: &mut Range| -> INT {
+		range.end as INT
+	});
 	engine.register_fn(
 		"start_offset",
 		|line: &mut Line| -> INT {
@@ -1340,42 +1361,27 @@ pub fn register_primitives(engine: &mut Engine, ctx: Context) {
 			line.end_offset as INT
 		}
 	);
-	engine.register_get(
-		"row",
-		|line: &mut Line| -> INT {
-			line.row as INT
-		}
-	);
+	engine.register_get("row", |line: &mut Line| -> INT {
+		line.row as INT
+	});
 	engine.register_fn(
 		"indent",
 		|line: &mut Line| -> String {
 			line.indent.clone()
 		}
 	);
-	engine.register_fn(
-		"text",
-		|line: &mut Line| -> String {
-			line.text.clone()
-		}
-	);
-	engine.register_fn(
-		"row",
-		|pos: &mut Position| -> INT {
-			pos.row as INT
-		}
-	);
-	engine.register_fn(
-		"col",
-		|pos: &mut Position| -> INT {
-			pos.col as INT
-		}
-	);
-	engine.register_fn(
-		"text",
-		|node: &mut Arc<NodeRef>| -> String {
-			node.text()
-		}
-	);
+	engine.register_fn("text", |line: &mut Line| -> String {
+		line.text.clone()
+	});
+	engine.register_fn("row", |pos: &mut Position| -> INT {
+		pos.row as INT
+	});
+	engine.register_fn("col", |pos: &mut Position| -> INT {
+		pos.col as INT
+	});
+	engine.register_fn("text", |node: &mut Arc<NodeRef>| -> String {
+		node.text()
+	});
 	engine.register_fn(
 		"kind_id",
 		|node: &mut Arc<NodeRef>| -> INT {
@@ -1386,6 +1392,95 @@ pub fn register_primitives(engine: &mut Engine, ctx: Context) {
 		"token_len",
 		|node: &mut Arc<NodeRef>| -> INT {
 			node.token_len() as INT
+		}
+	);
+	engine.register_fn(
+		"index",
+		|node: &mut Arc<NodeRef>| -> Dynamic {
+			match node.index() {
+				Some(index) => Dynamic::from_int(index as INT),
+				None => Dynamic::UNIT,
+			}
+		}
+	);
+	engine.register_fn(
+		"find",
+		|node: &mut Arc<NodeRef>, specs: Array| -> RhaiResult<Array> {
+			let mut parsed: Vec<FindSpec> = Vec::with_capacity(specs.len());
+			for spec in specs {
+				let spec_map = spec.try_cast::<Map>().ok_or("find expects an array of maps")?;
+				if spec_map.contains_key("recursive") {
+					return Err("find recursive is not supported yet".into());
+				}
+				let kind_id = if let Some(kind_value) = spec_map.get("kind_id") {
+					Some(parse_kind_id_list(kind_value.clone(), "find kind_id")?)
+				}
+				else {
+					None
+				};
+				let mut mode = FindMode::First;
+				if let Some(mode_value) = spec_map.get("mode") {
+					let mode_text = mode_value.clone()
+						.into_string()
+						.map_err(|_| "find mode expects string")?;
+					let mode_text = mode_text.trim().to_lowercase();
+					mode = parse_find_mode(&mode_text)?;
+				}
+				let exclude_kind_id = if let Some(exclude_value) = spec_map.get("exclude_kind_id") {
+					parse_kind_id_list(exclude_value.clone(), "find exclude_kind_id")?
+				}
+				else {
+					Vec::new()
+				};
+				let before_kind_id = if let Some(value) = spec_map.get("before_kind_id") {
+					Some(parse_kind_id_list(value.clone(), "find before_kind_id")?)
+				}
+				else {
+					None
+				};
+				let after_kind_id = if let Some(value) = spec_map.get("after_kind_id") {
+					Some(parse_kind_id_list(value.clone(), "find after_kind_id")?)
+				}
+				else {
+					None
+				};
+				let mut before_index: Option<usize> = None;
+				if let Some(before_value) = spec_map.get("before_index") {
+					let before_int = before_value.clone().try_cast::<INT>().ok_or("find before_index expects integer")?;
+					before_index = Some(int_to_usize(before_int, "before_index")?);
+				}
+				let mut after_index: Option<usize> = None;
+				if let Some(after_value) = spec_map.get("after_index") {
+					let after_int = after_value.clone().try_cast::<INT>().ok_or("find after_index expects integer")?;
+					after_index = Some(int_to_usize(after_int, "after_index")?);
+				}
+				parsed.push(
+					FindSpec {
+						kind_id,
+						mode,
+						exclude_kind_id,
+						before_kind_id,
+						after_kind_id,
+						before_index,
+						after_index
+					}
+				);
+			}
+			let results = node.find(&parsed);
+			let mut out = Array::with_capacity(results.len());
+			for result in results.into_iter() {
+				match result {
+					FindResult::None => out.push(Dynamic::UNIT),
+					FindResult::Single(node) => out.push(Dynamic::from(node)),
+					FindResult::Many(nodes) => {
+						let array: Array = nodes.into_iter()
+							.map(Dynamic::from)
+							.collect();
+						out.push(Dynamic::from(array));
+					}
+				}
+			}
+			Ok(out)
 		}
 	);
 	engine.register_fn(
@@ -1500,11 +1595,9 @@ pub fn register_primitives(engine: &mut Engine, ctx: Context) {
 		"kind",
 		|node: &mut Arc<NodeRef>, idx: INT| -> RhaiResult<INT> {
 			let idx = int_to_usize(idx, "idx")?;
-			Ok(
-				node.child_kind_id(idx)
-					.map(|k| k as INT)
-					.unwrap_or(-1)
-			)
+			Ok(node.child_kind_id(idx)
+				.map(|k| k as INT)
+				.unwrap_or(-1))
 		}
 	);
 	engine.register_fn(
@@ -1585,12 +1678,9 @@ pub fn register_primitives(engine: &mut Engine, ctx: Context) {
 			node.byte_range()
 		}
 	);
-	engine.register_fn(
-		"line",
-		|node: &mut Arc<NodeRef>| -> Line {
-			node.line()
-		}
-	);
+	engine.register_fn("line", |node: &mut Arc<NodeRef>| -> Line {
+		node.line()
+	});
 	engine.register_fn(
 		"parent",
 		|node: &mut Arc<NodeRef>| -> Dynamic {

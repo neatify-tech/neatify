@@ -70,6 +70,32 @@ pub struct NodeRef {
 	parent_cache: OnceLock<Option<Weak<NodeRef>>>,
 	next_sibling_cache: OnceLock<Option<Weak<NodeRef>>>,
 	prev_sibling_cache: OnceLock<Option<Weak<NodeRef>>>,
+	index_cache: OnceLock<Option<usize>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FindMode {
+	First,
+	Last,
+	All,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct FindSpec {
+	pub kind_id: Option<Vec<u16>>,
+	pub mode: FindMode,
+	pub exclude_kind_id: Vec<u16>,
+	pub before_kind_id: Option<Vec<u16>>,
+	pub after_kind_id: Option<Vec<u16>>,
+	pub before_index: Option<usize>,
+	pub after_index: Option<usize>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum FindResult {
+	None,
+	Single(Arc<NodeRef>),
+	Many(Vec<Arc<NodeRef>>),
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -91,7 +117,9 @@ impl NodeRef {
 					if cursor.goto_first_child() {
 						loop {
 							let child = cursor.node();
-							result.push(self.ctx.node_to_ref(child, &self.language));
+							let child_ref = self.ctx.node_to_ref(child, &self.language);
+							child_ref.set_index_cache(Some(result.len()));
+							result.push(child_ref);
 							if !cursor.goto_next_sibling() {
 								break;
 							}
@@ -117,6 +145,9 @@ impl NodeRef {
 	}
 	pub(crate) fn set_prev_sibling_cache(&self, prev: Option<Weak<NodeRef>>) {
 		let _ = self.prev_sibling_cache.set(prev);
+	}
+	pub(crate) fn set_index_cache(&self, index: Option<usize>) {
+		let _ = self.index_cache.set(index);
 	}
 	pub(crate) fn child_kind_id(&self, idx: usize) -> Option<u16> {
 		let children = self.children_cache.get_or_init(|| self.build_children());
@@ -171,7 +202,8 @@ impl NodeRef {
 			children_cache: OnceLock::new(),
 			parent_cache: OnceLock::new(),
 			next_sibling_cache: OnceLock::new(),
-			prev_sibling_cache: OnceLock::new()
+			prev_sibling_cache: OnceLock::new(),
+			index_cache: OnceLock::new()
 		}
 	}
 	pub fn set_doc_id(&self, doc_id: i64) {
@@ -224,6 +256,95 @@ impl NodeRef {
 	pub fn kind_id(&self) -> u16 {
 		self.kind_id
 	}
+	pub fn index(&self) -> Option<usize> {
+		self.index_cache
+			.get()
+			.copied()
+			.flatten()
+	}
+	// NOTE: Recursive search is intentionally deferred. We need to define how
+	// before/after should behave across traversal depth without surprising users.
+	pub(crate) fn find(&self, specs: &[FindSpec]) -> Vec<FindResult> {
+		if specs.is_empty() {
+			return Vec::new();
+		}
+		let mut results: Vec<FindResult> = vec![FindResult::None; specs.len()];
+		let mut seen_after: Vec<bool> = specs.iter()
+			.map(|spec| spec.after_kind_id.is_none())
+			.collect();
+		let mut seen_before: Vec<bool> = vec![false; specs.len()];
+		let children = self.children();
+		for (i, child) in children.iter().enumerate() {
+			let kind_id = child.kind_id();
+			let index = child.index().unwrap_or(i);
+			for (spec_idx, spec) in specs.iter().enumerate() {
+				let hit_after = spec.after_kind_id
+					.as_ref()
+					.is_some_and(|ids| ids.iter().any(|id| *id == kind_id));
+				let hit_before = spec.before_kind_id
+					.as_ref()
+					.is_some_and(|ids| ids.iter().any(|id| *id == kind_id));
+				if hit_after {
+					seen_after[spec_idx] = true;
+				}
+				if hit_before {
+					seen_before[spec_idx] = true;
+				}
+				if hit_after || hit_before {
+					continue;
+				}
+				if !seen_after[spec_idx] || seen_before[spec_idx] {
+					continue;
+				}
+				if let Some(after_index) = spec.after_index {
+					if index <= after_index {
+						continue;
+					}
+				}
+				if let Some(before_index) = spec.before_index {
+					if index >= before_index {
+						continue;
+					}
+				}
+				if !spec.exclude_kind_id.is_empty()
+					&& spec.exclude_kind_id
+						.iter()
+						.any(|id| *id == kind_id) {
+					continue;
+				}
+				if let Some(match_ids) = spec.kind_id.as_ref() {
+					if !match_ids.iter().any(|id| *id == kind_id) {
+						continue;
+					}
+				}
+				match spec.mode {
+					FindMode::First => {
+						if let FindResult::None = results[spec_idx] {
+							results[spec_idx] = FindResult::Single(Arc::clone(child));
+						}
+					}
+					FindMode::Last => {
+						results[spec_idx] = FindResult::Single(Arc::clone(child));
+					}
+					FindMode::All => match &mut results[spec_idx] {
+						FindResult::Many(items) => {
+							items.push(Arc::clone(child));
+						}
+						FindResult::Single(existing) => {
+							let mut items = Vec::new();
+							items.push(Arc::clone(existing));
+							items.push(Arc::clone(child));
+							results[spec_idx] = FindResult::Many(items);
+						}
+						FindResult::None => {
+							results[spec_idx] = FindResult::Many(vec![Arc::clone(child)]);
+						}
+					},
+				}
+			}
+		}
+		results
+	}
 	pub fn ancestor(
 		self: &Arc<NodeRef>,
 		kinds: &[u16],
@@ -252,14 +373,12 @@ impl NodeRef {
 				}
 				found = Some(Arc::clone(&parent));
 			}
-			let is_stop = has_stop
-				&& stop_kinds.unwrap_or(&[])
-					.iter()
-					.any(|k| *k == kind_id);
-			let is_continue_allowed = !has_continue
-				|| continue_kinds.unwrap_or(&[])
-					.iter()
-					.any(|k| *k == kind_id);
+			let is_stop = has_stop && stop_kinds.unwrap_or(&[])
+				.iter()
+				.any(|k| *k == kind_id);
+			let is_continue_allowed = !has_continue || continue_kinds.unwrap_or(&[])
+				.iter()
+				.any(|k| *k == kind_id);
 			if is_stop || !is_continue_allowed {
 				if boundary {
 					if let Some(found_node) = found {
@@ -676,11 +795,9 @@ impl Context {
 		let maps = self.kind_maps
 			.lock()
 			.unwrap_or_else(|e| e.into_inner());
-		maps.get(language).and_then(
-			|map| map.named_ids_by_name
-				.get(name)
-				.cloned()
-		)
+		maps.get(language).and_then(|map| map.named_ids_by_name
+			.get(name)
+			.cloned())
 	}
 	pub fn set_debug(&self, enabled: bool) {
 		self.debug.store(enabled, Ordering::Relaxed);
@@ -1110,6 +1227,7 @@ impl Context {
 					let parent_weak = Arc::downgrade(&node_ref);
 					for i in 0..children_refs.len() {
 						children_refs[i].set_parent_cache(Some(parent_weak.clone()));
+						children_refs[i].set_index_cache(Some(i));
 						if i + 1 < children_refs.len() {
 							let next_weak = Arc::downgrade(&children_refs[i + 1]);
 							children_refs[i].set_next_sibling_cache(Some(next_weak));
