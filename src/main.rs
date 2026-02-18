@@ -176,7 +176,13 @@ fn main() {
 	if let Some(args) = cli.repository_add.as_ref() {
 		let name = args[0].clone();
 		let url = args[1].clone();
-		repository_add(&mut config, &cache_root, &name, &url, config_exists)
+		repository_add(
+			&mut config,
+			&cache_root,
+			&name,
+			&url,
+			config_exists
+		)
 			.unwrap_or_else(|err| exit_with_error(&err));
 		write_config(&config_path, &config).unwrap_or_else(|err| exit_with_error(&err));
 		return;
@@ -242,7 +248,13 @@ fn main() {
 		return;
 	}
 	if cli.test {
-		run_tests(&cli, &repositories, language.clone(), &file_targets, &reporter)
+		run_tests(
+			&cli,
+			&repositories,
+			language.clone(),
+			&file_targets,
+			&reporter
+		)
 			.unwrap_or_else(|err| exit_with_error(&err));
 		return;
 	}
@@ -284,7 +296,14 @@ fn main() {
 		}
 		let (language_name, language_roots) = resolve_language_roots(language, &repositories).unwrap_or_else(|err| exit_with_error(&err));
 		let language_spec = resolve_language_spec(&language_name, &language_roots).unwrap_or_else(|err| exit_with_error(&err));
-		lsp::run_lsp(language_spec, language_roots, overrides, cli.debug, test_group_env, strict)
+		lsp::run_lsp(
+			language_spec,
+			language_roots,
+			overrides,
+			cli.debug,
+			test_group_env,
+			strict
+		)
 			.unwrap_or_else(|err| exit_with_error(&err));
 		return;
 	}
@@ -426,13 +445,11 @@ fn load_repositories(config: &NeatifyConfig) -> Vec<RepositoryRecord> {
 		if !root.exists() {
 			continue;
 		}
-		records.push(
-			RepositoryRecord {
-				name: entry.name.clone(),
-				root,
-				config: entry.clone()
-			}
-		);
+		records.push(RepositoryRecord {
+			name: entry.name.clone(),
+			root,
+			config: entry.clone()
+		});
 	}
 	records
 }
@@ -562,7 +579,14 @@ fn sync_repositories(
 				continue;
 			}
 		}
-		sync_repository(&entry.name, &repo_root, &url, &manifest, &cache, sync_tests)?;
+		sync_repository(
+			&entry.name,
+			&repo_root,
+			&url,
+			&manifest,
+			&cache,
+			sync_tests
+		)?;
 		entry.version = manifest.version.clone();
 		entry.last_checked = Some(now_timestamp());
 		entry.last_synced = Some(now_timestamp());
@@ -606,14 +630,12 @@ fn sync_repository(
 		std::fs::write(&dest, &data).map_err(|e| format!("write {}: {e}", dest.display()))?;
 		let (hash, size) = hash_file(&dest)?;
 		if hash != entry.sha256 || size != entry.size {
-			return Err(
-				format!(
-					"hash mismatch for {} (expected {}, {})",
-					dest.display(),
-					entry.sha256,
-					entry.size
-				)
-			);
+			return Err(format!(
+				"hash mismatch for {} (expected {}, {})",
+				dest.display(),
+				entry.sha256,
+				entry.size
+			));
 		}
 	}
 	Ok(())
@@ -806,14 +828,11 @@ impl FormatRunner {
 			}
 		);
 		let debug_enabled = debug;
-		engine.register_fn(
-			"log",
-			move |message: &str| {
-				if debug_enabled {
-					eprintln!("[neatify] {message}");
-				}
+		engine.register_fn("log", move |message: &str| {
+			if debug_enabled {
+				eprintln!("[neatify] {message}");
 			}
-		);
+		});
 		let ast = compile_ast_cached(&engine, &entry_path)?;
 		Ok(
 			Self {
@@ -1273,13 +1292,11 @@ impl DumpTreeRunner {
 		let mut parser = TsParser::new();
 		parser.set_language(&lang)
 			.map_err(|e| format!("failed to set language '{}': {e}", spec.treesitter.language))?;
-		Ok(
-			Self {
-				parser,
-				language: lang,
-				_libs: libs
-			}
-		)
+		Ok(Self {
+			parser,
+			language: lang,
+			_libs: libs
+		})
 	}
 }
 
@@ -1308,7 +1325,12 @@ fn dump_trees(
 		let mut runner = DumpTreeRunner::new(&language_spec, roots)?;
 		let mut source = String::new();
 		std::io::stdin().read_to_string(&mut source).map_err(|e| format!("read stdin: {e}"))?;
-		dump_tree_for_source(&mut runner, "stdin", &source, range)?;
+		dump_tree_for_source(
+			&mut runner,
+			"stdin",
+			&source,
+			range
+		)?;
 		return Ok(());
 	}
 	if let Some(language) = language {
@@ -1357,7 +1379,12 @@ fn dump_tree_for_file(
 	file: &str,
 	range: Option<&RangeSpec>) -> Result<(), String> {
 	let source = std::fs::read_to_string(file).map_err(|e| format!("read {file}: {e}"))?;
-	dump_tree_for_source(runner, file, &source, range)
+	dump_tree_for_source(
+		runner,
+		file,
+		&source,
+		range
+	)
 }
 
 fn dump_tree_for_source(
@@ -1378,7 +1405,12 @@ fn dump_tree_for_source(
 	};
 	println!("== {label} ==");
 	let mut counts = DumpTreeCounts::default();
-	dump_tree_node(target, false, &runner.language, &mut counts);
+	dump_tree_node(
+		target,
+		false,
+		&runner.language,
+		&mut counts
+	);
 	let node_text = color(&counts.nodes.to_string(), Color::Green, false);
 	let error_text = color(&counts.errors.to_string(), Color::Red, counts.errors > 0);
 	let missing_text = color(&counts.missing.to_string(), Color::Yellow, counts.missing > 0);
@@ -1499,14 +1531,11 @@ pub(crate) fn format_source(
 		}
 	);
 	let debug_enabled = debug;
-	engine.register_fn(
-		"log",
-		move |message: &str| {
-			if debug_enabled {
-				eprintln!("[neatify] {message}");
-			}
+	engine.register_fn("log", move |message: &str| {
+		if debug_enabled {
+			eprintln!("[neatify] {message}");
 		}
-	);
+	});
 	let ast = compile_ast_cached(&engine, entry_path)?;
 	if strict {
 		let issues = ctx.parse_issues(language, 6)?;
@@ -1552,16 +1581,12 @@ fn parse_range_arg(input: Option<&str>) -> Result<Option<RangeSpec>, String> {
 	if start_row > end_row || (start_row == end_row && start_col > end_col) {
 		return Err("invalid --range: start after end".to_string());
 	}
-	Ok(
-		Some(
-			RangeSpec {
-				start_row,
-				start_col,
-				end_row,
-				end_col
-			}
-		)
-	)
+	Ok(Some(RangeSpec {
+		start_row,
+		start_col,
+		end_row,
+		end_col
+	}))
 }
 
 fn parse_row_col(input: &str, label: &str) -> Result<(usize, usize), String> {
@@ -1637,8 +1662,18 @@ pub(crate) fn format_fragment(
 
 pub(crate) fn range_offsets(source: &str, range: &RangeSpec) -> Result<RangeOffsets, String> {
 	let starts = line_starts(source);
-	let start = offset_for_position(source, &starts, range.start_row, range.start_col)?;
-	let end = offset_for_position(source, &starts, range.end_row, range.end_col)?;
+	let start = offset_for_position(
+		source,
+		&starts,
+		range.start_row,
+		range.start_col
+	)?;
+	let end = offset_for_position(
+		source,
+		&starts,
+		range.end_row,
+		range.end_col
+	)?;
 	if start > end {
 		return Err("invalid --range: start after end".to_string());
 	}
@@ -2072,7 +2107,12 @@ fn run_tests(
 			let repo = find_repository(repositories, namespace)?;
 			let roots = vec![repo.root.clone()];
 			let language_spec = resolve_language_spec(name, &roots)?;
-			discover_tests_from_fs(&repo.root, namespace, name, &language_spec.extensions)?
+			discover_tests_from_fs(
+				&repo.root,
+				namespace,
+				name,
+				&language_spec.extensions
+			)?
 		}
 		else {
 			let mut tests = Vec::new();
@@ -2176,7 +2216,12 @@ fn run_tests(
 			}
 			else {
 				passed += 1;
-				reporter.test_result(&test.name, TestStatus::Pass, None, None);
+				reporter.test_result(
+					&test.name,
+					TestStatus::Pass,
+					None,
+					None
+				);
 			}
 		}
 	}
@@ -2208,7 +2253,13 @@ fn run_lint(
 		if files.is_empty() {
 			return Err("no files found".to_string());
 		}
-		let result = lint_language_files(&language_spec, &roots, &files, strict, reporter)?;
+		let result = lint_language_files(
+			&language_spec,
+			&roots,
+			&files,
+			strict,
+			reporter
+		)?;
 		total_errors += result.errors;
 		summary.add(&result.summary);
 	}
@@ -2220,7 +2271,13 @@ fn run_lint(
 		}
 		for (language, files) in files_by_language.iter() {
 			let language_spec = resolve_language_spec(language, &repo_roots)?;
-			let result = lint_language_files(&language_spec, &repo_roots, files, strict, reporter)?;
+			let result = lint_language_files(
+				&language_spec,
+				&repo_roots,
+				files,
+				strict,
+				reporter
+			)?;
 			total_errors += result.errors;
 			summary.add(&result.summary);
 		}
@@ -2273,7 +2330,12 @@ fn lint_language_files(
 					format!("{file}:{row}:{col} parse error")
 				};
 				let context = contexts.get(idx).map(|ctx| std::slice::from_ref(ctx));
-				reporter.lint_issue(file, &message, "error", context);
+				reporter.lint_issue(
+					file,
+					&message,
+					"error",
+					context
+				);
 			}
 			error_count += issues.len();
 			if strict {
@@ -2283,12 +2345,10 @@ fn lint_language_files(
 		let _ = strict;
 		// Linter execution will be added when language specs include a linter entry.
 	}
-	Ok(
-		LintResult {
-			summary,
-			errors: error_count
-		}
-	)
+	Ok(LintResult {
+		summary,
+		errors: error_count
+	})
 }
 
 struct TestCase {
@@ -2359,11 +2419,9 @@ fn discover_tests_from_fs(
 				continue;
 			}
 			let expected_rel = rel.replace(&in_suffix, &format!(".out{ext}"));
-			let expected = set.get(&expected_rel).ok_or_else(
-				|| {
-					format!("missing expected test file: {expected_rel}")
-				}
-			)?;
+			let expected = set.get(&expected_rel).ok_or_else(|| {
+				format!("missing expected test file: {expected_rel}")
+			})?;
 			let name = format!("{namespace}/{rel}");
 			tests.push(
 				TestCase {
@@ -2398,11 +2456,9 @@ fn discover_all_tests_from_fs(repositories: &[RepositoryRecord]) -> Result<Vec<T
 			}
 			let language = extract_language_from_test_path(rel)?;
 			let expected_rel = rel.replace(".in.", ".out.");
-			let expected = set.get(&expected_rel).ok_or_else(
-				|| {
-					format!("missing expected test file: {expected_rel}")
-				}
-			)?;
+			let expected = set.get(&expected_rel).ok_or_else(|| {
+				format!("missing expected test file: {expected_rel}")
+			})?;
 			tests.push(
 				TestCase {
 					language: format!("{}/{}", repo.name, language),
@@ -2456,13 +2512,11 @@ fn generate_manifest_for_local_repository(root: &Path) -> Result<(), String> {
 			continue;
 		}
 		let (hash, size) = hash_file(&file)?;
-		entries.push(
-			ManifestEntry {
-				path: rel,
-				sha256: hash,
-				size
-			}
-		);
+		entries.push(ManifestEntry {
+			path: rel,
+			sha256: hash,
+			size
+		});
 	}
 	let mut manifest = Manifest {
 		version: None,
@@ -2747,15 +2801,13 @@ impl Reporter {
 			eprintln!("Summary: {passed} passed, {failed} failed");
 			return;
 		}
-		self.emit_json_object(
-			json!({
-				"type": "summary",
-				"passed": passed,
-				"failed": failures,
-			}).as_object()
-				.unwrap()
-				.clone()
-		);
+		self.emit_json_object(json!({
+			"type": "summary",
+			"passed": passed,
+			"failed": failures,
+		}).as_object()
+			.unwrap()
+			.clone());
 	}
 	fn lint_issue(
 		&self,
@@ -2842,14 +2894,13 @@ fn contexts_to_json(contexts: &[IssueContext]) -> serde_json::Value {
 			|context| {
 				let lines: Vec<serde_json::Value> = context.lines
 					.iter()
-					.map(
-						|line| {
-							json!({
-								"line": line.line,
-								"text": line.text,
-								"marker": line.marker,
-							})
+					.map(|line| {
+						json!({
+							"line": line.line,
+							"text": line.text,
+							"marker": line.marker,
 						})
+					})
 					.collect();
 				json!({
 					"label": context.label,
@@ -2961,14 +3012,17 @@ fn build_issue_contexts_from_issues(
 			else {
 				None
 			};
-			let marker = build_marker(line_text, start_rel, end_rel, fallback_col);
-			lines.push(
-				IssueContextLine {
-					line: row + 1,
-					text: line_text.to_string(),
-					marker
-				}
+			let marker = build_marker(
+				line_text,
+				start_rel,
+				end_rel,
+				fallback_col
 			);
+			lines.push(IssueContextLine {
+				line: row + 1,
+				text: line_text.to_string(),
+				marker
+			});
 		}
 		let header = if issue.is_missing {
 			format!("missing {}", issue.kind)
@@ -2977,14 +3031,12 @@ fn build_issue_contexts_from_issues(
 			"error".to_string()
 		};
 		let label = format!("{}:{}:{}", label, issue.position.row + 1, issue.position.col + 1);
-		contexts.push(
-			IssueContext {
-				label,
-				header,
-				is_missing: issue.is_missing,
-				lines
-			}
-		);
+		contexts.push(IssueContext {
+			label,
+			header,
+			is_missing: issue.is_missing,
+			lines
+		});
 	}
 	contexts
 }

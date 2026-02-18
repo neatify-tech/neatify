@@ -39,8 +39,18 @@ impl DocArena {
 		self.docs.push(doc);
 		id
 	}
-	pub fn render(&self, doc_id: DocId, width: usize, source: &str) -> String {
-		let printer = DocPrinter::new(self, width, source, IndentStyle::Tabs, 4);
+	pub fn render(
+		&self,
+		doc_id: DocId,
+		width: usize,
+		source: &str) -> String {
+		let printer = DocPrinter::new(
+			self,
+			width,
+			source,
+			IndentStyle::Tabs,
+			4
+		);
 		printer.render(doc_id)
 	}
 	pub fn render_with_indent(
@@ -50,7 +60,13 @@ impl DocArena {
 		source: &str,
 		indent_style: IndentStyle,
 		tab_width: usize) -> String {
-		let printer = DocPrinter::new(self, width, source, indent_style, tab_width);
+		let printer = DocPrinter::new(
+			self,
+			width,
+			source,
+			indent_style,
+			tab_width
+		);
 		printer.render(doc_id)
 	}
 }
@@ -168,7 +184,11 @@ impl <'a> DocPrinter<'a> {
 		}
 		self.col = indent;
 	}
-	fn fits(&self, doc_id: DocId, indent: usize, mut remaining: usize) -> bool {
+	fn fits(
+		&self,
+		doc_id: DocId,
+		indent: usize,
+		mut remaining: usize) -> bool {
 		let mut stack = vec![(doc_id, indent, PrintMode::Flat)];
 		while let Some((id, indent, mode)) = stack.pop() {
 			if id >= self.arena

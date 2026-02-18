@@ -154,11 +154,7 @@ impl LanguageServer for Backend {
 		Ok(
 			InitializeResult {
 				capabilities: ServerCapabilities {
-					text_document_sync: Some(
-						TextDocumentSyncCapability::Kind(
-							TextDocumentSyncKind::FULL
-						)
-					),
+					text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
 					document_formatting_provider: Some(OneOf::Left(true)),
 					document_range_formatting_provider: Some(OneOf::Left(true)),
 					..ServerCapabilities::default()
@@ -221,14 +217,10 @@ impl LanguageServer for Backend {
 			return Ok(Some(Vec::new()));
 		}
 		let range = full_document_range(&text);
-		Ok(
-			Some(
-				vec![TextEdit {
-					range,
-					new_text: formatted,
-				}]
-			)
-		)
+		Ok(Some(vec![TextEdit {
+			range,
+			new_text: formatted,
+		}]))
 	}
 	async fn range_formatting(
 		&self,
@@ -240,14 +232,10 @@ impl LanguageServer for Backend {
 		let range = params.range;
 		let range_spec = range_to_spec(&range)?;
 		let fragment = self.format_range(&text, &range_spec)?;
-		Ok(
-			Some(
-				vec![TextEdit {
-					range,
-					new_text: fragment,
-				}]
-			)
-		)
+		Ok(Some(vec![TextEdit {
+			range,
+			new_text: fragment,
+		}]))
 	}
 }
 
@@ -261,14 +249,12 @@ fn range_to_spec(range: &Range) -> Result<RangeSpec, LspError> {
 	if start_row > end_row || (start_row == end_row && start_col > end_col) {
 		return Err(LspError::invalid_params("range start after end"));
 	}
-	Ok(
-		RangeSpec {
-			start_row,
-			start_col,
-			end_row,
-			end_col
-		}
-	)
+	Ok(RangeSpec {
+		start_row,
+		start_col,
+		end_row,
+		end_col
+	})
 }
 
 fn full_document_range(text: &str) -> Range {

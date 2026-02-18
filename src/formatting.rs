@@ -33,13 +33,10 @@ fn compile_ast_cached(engine: &Engine, entry_path: &Path) -> Result<AST, String>
 				}
 			}
 			let ast = engine.compile_file(key.clone()).map_err(|e| format!("compile error: {e}"))?;
-			cache.insert(
-				key,
-				CachedAst {
-					mtime,
-					ast: ast.clone()
-				}
-			);
+			cache.insert(key, CachedAst {
+				mtime,
+				ast: ast.clone()
+			});
 			Ok(ast)
 		}
 	)
@@ -245,14 +242,11 @@ pub(crate) fn format_source_with_settings(
 		}
 	);
 	let debug_enabled = debug;
-	engine.register_fn(
-		"log",
-		move |message: &str| {
-			if debug_enabled {
-				eprintln!("[neatify] {message}");
-			}
+	engine.register_fn("log", move |message: &str| {
+		if debug_enabled {
+			eprintln!("[neatify] {message}");
 		}
-	);
+	});
 	let ast = compile_ast_cached(&engine, entry_path)?;
 	if strict {
 		let issues = ctx.parse_issues(language, 6)?;
@@ -355,8 +349,18 @@ pub(crate) fn format_fragment_with_settings(
 
 pub fn range_offsets(source: &str, range: &RangeSpec) -> Result<RangeOffsets, String> {
 	let starts = line_starts(source);
-	let start = offset_for_position(source, &starts, range.start_row, range.start_col)?;
-	let end = offset_for_position(source, &starts, range.end_row, range.end_col)?;
+	let start = offset_for_position(
+		source,
+		&starts,
+		range.start_row,
+		range.start_col
+	)?;
+	let end = offset_for_position(
+		source,
+		&starts,
+		range.end_row,
+		range.end_col
+	)?;
 	if start > end {
 		return Err("invalid --range: start after end".to_string());
 	}

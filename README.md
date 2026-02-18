@@ -213,6 +213,7 @@ The `{os}` and `{arch}` folder names come from Rust's `std::env::consts::OS` and
 ## Rhai API (Rust bindings)
 
 Node API
+
 - `text(node)`: get a Node source text.
 - `kind_id(node)`: get a Node kind id.
 - `token_len(node)`: get total token byte length (no whitespace).
@@ -239,6 +240,7 @@ Node API
 - `prev_sibling(node)`: get previous sibling (or unit).
 
 Doc API
+
 - `doc_reset()`: clear the doc store.
 - `doc_text(text)`: create a text doc.
 - `doc_range(start, end)`: create a doc from a source range.
@@ -253,6 +255,7 @@ Doc API
 - `doc_render_with_indent(doc, width, indent_style, tab_width)`: render with indent style.
 
 Query & walk
+
 - `query(language, query)`: run a tree-sitter query.
 - `query(language, query, scope: Range)`: run a scoped query by range.
 - `query(language, query, scope: Node)`: run a scoped query by node.
@@ -263,6 +266,7 @@ Query & walk
 - `captures(match)`: return capture map for a query match.
 
 Range, line, and position
+
 - `range(start, end)`: create a byte range.
 - `start(range)`: get a range start offset.
 - `end(range)`: get a range end offset.
@@ -277,12 +281,14 @@ Range, line, and position
 - `col(position)`: get a Position column.
 
 Language and formatting helpers
+
 - `kind_id(language, name, named)`: look up a kind id.
 - `kind_ids(language, names, named_flags)`: look up multiple kind ids.
 - `kind_ids_map(language, names, named_flags)`: map kind names to ids.
 - `format_fragment_doc(language, range)`: format an embedded fragment into a doc.
 
 Context and utilities
+
 - `source_len()`: total source length in bytes.
 - `cache_get(key)`: read a cached value (or unit if missing).
 - `cache_set(key, value)`: store a cached value.
@@ -293,6 +299,7 @@ Context and utilities
 - `slice(range)`: extract source text for a range.
 
 String helpers
+
 - `trim(s)`: trim both ends of a string.
 - `trim_start(s)`: trim leading whitespace.
 - `trim_end(s)`: trim trailing whitespace.

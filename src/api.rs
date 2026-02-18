@@ -448,11 +448,9 @@ impl NodeRef {
 						.with_node(
 							self,
 							|node| {
-								node.next_sibling().map(
-									|sibling| {
-										Arc::downgrade(&self.ctx.node_to_ref(sibling, &self.language))
-									}
-								)
+								node.next_sibling().map(|sibling| {
+									Arc::downgrade(&self.ctx.node_to_ref(sibling, &self.language))
+								})
 							}
 						)
 						.unwrap_or(None)
@@ -469,11 +467,9 @@ impl NodeRef {
 						.with_node(
 							self,
 							|node| {
-								node.prev_sibling().map(
-									|sibling| {
-										Arc::downgrade(&self.ctx.node_to_ref(sibling, &self.language))
-									}
-								)
+								node.prev_sibling().map(|sibling| {
+									Arc::downgrade(&self.ctx.node_to_ref(sibling, &self.language))
+								})
 							}
 						)
 						.unwrap_or(None)
@@ -797,11 +793,9 @@ impl Context {
 		let maps = self.kind_maps
 			.lock()
 			.unwrap_or_else(|e| e.into_inner());
-		maps.get(language).and_then(
-			|map| map.named_ids_by_name
-				.get(name)
-				.cloned()
-		)
+		maps.get(language).and_then(|map| map.named_ids_by_name
+			.get(name)
+			.cloned())
 	}
 	pub fn set_debug(&self, enabled: bool) {
 		self.debug.store(enabled, Ordering::Relaxed);
@@ -906,7 +900,12 @@ impl Context {
 		}
 		Position { row, col }
 	}
-	pub fn range_around(&self, node: &NodeRef, before: i64, after: i64, same_line: bool) -> Range {
+	pub fn range_around(
+		&self,
+		node: &NodeRef,
+		before: i64,
+		after: i64,
+		same_line: bool) -> Range {
 		let mut start = node.range
 			.start
 			.saturating_sub(before.max(0) as usize);
@@ -961,7 +960,11 @@ impl Context {
 		}
 		Ok(issues)
 	}
-	pub fn query(&self, language: &str, query: &str, scope: Option<&Range>) -> Vec<Match> {
+	pub fn query(
+		&self,
+		language: &str,
+		query: &str,
+		scope: Option<&Range>) -> Vec<Match> {
 		let Some(lang) = self.lookup_language(language) else {
 			return Vec::new();
 		};
@@ -1131,7 +1134,13 @@ impl Context {
 		let source = self.source
 			.lock()
 			.unwrap_or_else(|e| e.into_inner());
-		docs.render_with_indent(doc, width, &source, indent_style, tab_width)
+		docs.render_with_indent(
+			doc,
+			width,
+			&source,
+			indent_style,
+			tab_width
+		)
 	}
 	// Clear cached ASTs after in-memory source edits.
 	#[allow(dead_code)]
@@ -1257,12 +1266,10 @@ impl Context {
 			let mut precache = self.precache_stats
 				.lock()
 				.unwrap_or_else(|e| e.into_inner());
-			*precache = Some(
-				PrecacheStats {
-					nodes: node_count,
-					total_ns: elapsed.as_nanos()
-				}
-			);
+			*precache = Some(PrecacheStats {
+				nodes: node_count,
+				total_ns: elapsed.as_nanos()
+			});
 		}
 	}
 	fn parse_tree(&self, language: &str, lang: &tree_sitter::Language) -> Result<Tree, String> {
@@ -1408,7 +1415,11 @@ impl Context {
 	pub(crate) fn node_ref(&self, node: Node, language: &str) -> Arc<NodeRef> {
 		self.node_to_ref(node, language)
 	}
-	pub(crate) fn set_node_doc_id(&self, node: &Node, language: &str, doc_id: INT) {
+	pub(crate) fn set_node_doc_id(
+		&self,
+		node: &Node,
+		language: &str,
+		doc_id: INT) {
 		let key = NodeCacheKey {
 			start: node.start_byte(),
 			end: node.end_byte(),
