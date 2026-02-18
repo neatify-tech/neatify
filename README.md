@@ -209,3 +209,93 @@ The `{os}` and `{arch}` folder names come from Rust's `std::env::consts::OS` and
 
 - `os`: `linux`, `macos`, `windows`
 - `arch`: `x86_64`, `aarch64`, `arm`, `i686`
+
+## Rhai API (Rust bindings)
+
+Node API
+- `text(node)`: get a Node source text.
+- `kind_id(node)`: get a Node kind id.
+- `token_len(node)`: get total token byte length (no whitespace).
+- `index(node)`: get cached child index (or unit).
+- `find(node, specs)`: find child nodes by specs.
+- `ancestor(node, kinds)`: find the nearest ancestor with matching kinds.
+- `ancestor(node, kinds, opts)`: ancestor search with options (`furthest`, `boundary`, `self`, `stop`, `allow`).
+- `len(node)`: child count (deprecated child-view alias).
+- `kind(node, idx)`: child kind id at index.
+- `range(node, idx)`: child range at index.
+- `doc(node, idx)`: child doc id at index.
+- `child(node, idx)`: child node at index.
+- `child_count(node)`: number of children.
+- `doc_id(node)`: get a Node doc id (or unit).
+- `set_doc_id(node, id)`: set a Node doc id.
+- `start_position(node)`: get start Position for a Node.
+- `end_position(node)`: get end Position for a Node.
+- `range(node)`: get a Node byte range.
+- `byte_range(node)`: get a Node byte range (deprecated alias).
+- `line(node)`: get the Line for a Node start.
+- `parent(node)`: get a Node parent (or unit).
+- `children(node)`: get Node children array.
+- `next_sibling(node)`: get next sibling (or unit).
+- `prev_sibling(node)`: get previous sibling (or unit).
+
+Doc API
+- `doc_reset()`: clear the doc store.
+- `doc_text(text)`: create a text doc.
+- `doc_range(start, end)`: create a doc from a source range.
+- `doc_node(node)`: create a doc from a Node range.
+- `doc_for_node(node)`: fetch a cached doc id (or unit).
+- `doc_softline()`: create a soft line break doc.
+- `doc_hardline()`: create a hard line break doc.
+- `doc_concat(docs)`: concatenate docs.
+- `doc_group(doc)`: group a doc.
+- `doc_indent(by, doc)`: indent a doc.
+- `doc_render(doc, width)`: render a doc to text.
+- `doc_render_with_indent(doc, width, indent_style, tab_width)`: render with indent style.
+
+Query & walk
+- `query(language, query)`: run a tree-sitter query.
+- `query(language, query, scope: Range)`: run a scoped query by range.
+- `query(language, query, scope: Node)`: run a scoped query by node.
+- `query_ranges(language, query)`: return match ranges for a query.
+- `root_node(language)`: get the root Node for a language.
+- `walk(language, queries, rule)`: walk the AST with a rule callback.
+- `walk(language, queries, rule, opts)`: walk with options (`rewrite`).
+- `captures(match)`: return capture map for a query match.
+
+Range, line, and position
+- `range(start, end)`: create a byte range.
+- `start(range)`: get a range start offset.
+- `end(range)`: get a range end offset.
+- `line_at(pos)`: return the Line at a byte position.
+- `range_around(node, before, after, same_line)`: expand a range around a node.
+- `start_offset(line)`: get a Line start offset.
+- `end_offset(line)`: get a Line end offset.
+- `row(line)`: get a Line row index.
+- `indent(line)`: get a Line leading whitespace.
+- `text(line)`: get a Line text.
+- `row(position)`: get a Position row.
+- `col(position)`: get a Position column.
+
+Language and formatting helpers
+- `kind_id(language, name, named)`: look up a kind id.
+- `kind_ids(language, names, named_flags)`: look up multiple kind ids.
+- `kind_ids_map(language, names, named_flags)`: map kind names to ids.
+- `format_fragment_doc(language, range)`: format an embedded fragment into a doc.
+
+Context and utilities
+- `source_len()`: total source length in bytes.
+- `cache_get(key)`: read a cached value (or unit if missing).
+- `cache_set(key, value)`: store a cached value.
+- `now_ms()`: current time in milliseconds since epoch.
+- `trace(name)`: start a profiling span and return a TraceSpan.
+- `end(span)`: stop a TraceSpan.
+- `set_output(text)`: override the formatter output string.
+- `slice(range)`: extract source text for a range.
+
+String helpers
+- `trim(s)`: trim both ends of a string.
+- `trim_start(s)`: trim leading whitespace.
+- `trim_end(s)`: trim trailing whitespace.
+- `len(s)`: string length in characters.
+- `is_empty(s)`: string empty check.
+- `last_index_of(s, needle)`: last index of a substring.

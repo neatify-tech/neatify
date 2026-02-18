@@ -373,12 +373,14 @@ impl NodeRef {
 				}
 				found = Some(Arc::clone(&parent));
 			}
-			let is_stop = has_stop && stop_kinds.unwrap_or(&[])
-				.iter()
-				.any(|k| *k == kind_id);
-			let is_continue_allowed = !has_continue || continue_kinds.unwrap_or(&[])
-				.iter()
-				.any(|k| *k == kind_id);
+			let is_stop = has_stop
+				&& stop_kinds.unwrap_or(&[])
+					.iter()
+					.any(|k| *k == kind_id);
+			let is_continue_allowed = !has_continue
+				|| continue_kinds.unwrap_or(&[])
+					.iter()
+					.any(|k| *k == kind_id);
 			if is_stop || !is_continue_allowed {
 				if boundary {
 					if let Some(found_node) = found {
@@ -795,9 +797,11 @@ impl Context {
 		let maps = self.kind_maps
 			.lock()
 			.unwrap_or_else(|e| e.into_inner());
-		maps.get(language).and_then(|map| map.named_ids_by_name
-			.get(name)
-			.cloned())
+		maps.get(language).and_then(
+			|map| map.named_ids_by_name
+				.get(name)
+				.cloned()
+		)
 	}
 	pub fn set_debug(&self, enabled: bool) {
 		self.debug.store(enabled, Ordering::Relaxed);

@@ -1714,7 +1714,7 @@ fn collect_files_for_language(
 			continue;
 		}
 		let path = entry.path();
-		if is_ignored(path, &ignore_set) {
+		if is_ignored(path, &cwd, &ignore_set) {
 			continue;
 		}
 		if let Some(path_str) = path.to_str() {
@@ -1755,7 +1755,7 @@ fn collect_files_from_targets(
 			continue;
 		}
 		let path = entry.path();
-		if respect_ignore && is_ignored(path, &ignore_set) {
+		if respect_ignore && is_ignored(path, &cwd, &ignore_set) {
 			continue;
 		}
 		if !target_set.is_empty() {
@@ -1820,7 +1820,7 @@ fn collect_files_all(
 			continue;
 		}
 		let path = entry.path();
-		if respect_ignore && is_ignored(path, &ignore_set) {
+		if respect_ignore && is_ignored(path, &cwd, &ignore_set) {
 			continue;
 		}
 		if !target_set.is_empty() {
@@ -1855,9 +1855,34 @@ fn collect_files_all(
 fn build_ignore_set(cwd: &Path, patterns: &[String]) -> Result<(GlobSet, bool), String> {
 	let mut builder = GlobSetBuilder::new();
 	let mut use_gitignore = true;
+	let expand_patterns = |raw: &str| {
+		let mut base = raw.to_string();
+		if base.ends_with('/') {
+			base.push_str("**");
+		}
+		let anchored = base.starts_with('/');
+		if anchored {
+			base = base.trim_start_matches('/').to_string();
+		}
+		if base.is_empty() {
+			return Vec::new();
+		}
+		let has_slash = base.contains('/');
+		let mut out = Vec::new();
+		out.push(base.clone());
+		if !has_slash {
+			out.push(format!("**/{}", base));
+		}
+		else if !anchored && !base.starts_with("**/") {
+			out.push(format!("**/{}", base));
+		}
+		out
+	};
 	for pattern in patterns.iter() {
-		let glob = Glob::new(pattern).map_err(|e| e.to_string())?;
-		builder.add(glob);
+		for expanded in expand_patterns(pattern) {
+			let glob = Glob::new(&expanded).map_err(|e| e.to_string())?;
+			builder.add(glob);
+		}
 	}
 	let neatify_ignore = cwd.join(".neatifyignore");
 	if neatify_ignore.exists() {
@@ -1872,8 +1897,10 @@ fn build_ignore_set(cwd: &Path, patterns: &[String]) -> Result<(GlobSet, bool), 
 				use_gitignore = false;
 				continue;
 			}
-			let glob = Glob::new(line).map_err(|e| e.to_string())?;
-			builder.add(glob);
+			for expanded in expand_patterns(line) {
+				let glob = Glob::new(&expanded).map_err(|e| e.to_string())?;
+				builder.add(glob);
+			}
 		}
 	}
 	let ignore_set = builder.build().map_err(|e| e.to_string())?;
@@ -3085,6 +3112,12 @@ fn parse_bool_env(value: &str) -> Option<bool> {
 	}
 }
 
-fn is_ignored(path: &Path, ignore_set: &GlobSet) -> bool {
-	ignore_set.is_match(path)
+fn is_ignored(path: &Path, cwd: &Path, ignore_set: &GlobSet) -> bool {
+	if ignore_set.is_match(path) {
+		return true;
+	}
+	if let Ok(rel) = path.strip_prefix(cwd) {
+		return ignore_set.is_match(rel);
+	}
+	false
 }

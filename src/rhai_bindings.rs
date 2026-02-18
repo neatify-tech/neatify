@@ -1209,9 +1209,12 @@ pub fn register_primitives(engine: &mut Engine, ctx: Context) {
 		}
 	);
 	let ctx_len = ctx.clone();
-	engine.register_fn("source_len", move || -> INT {
-		ctx_len.source_len() as INT
-	});
+	engine.register_fn(
+		"source_len",
+		move || -> INT {
+			ctx_len.source_len() as INT
+		}
+	);
 	let ctx_cache_get = ctx.clone();
 	engine.register_fn(
 		"cache_get",
@@ -1343,12 +1346,18 @@ pub fn register_primitives(engine: &mut Engine, ctx: Context) {
 			walk_impl(&ctx_walk_opts, ctx_call, language, queries, rule, rewrite)
 		}
 	);
-	engine.register_fn("start", |range: &mut Range| -> INT {
-		range.start as INT
-	});
-	engine.register_fn("end", |range: &mut Range| -> INT {
-		range.end as INT
-	});
+	engine.register_fn(
+		"start",
+		|range: &mut Range| -> INT {
+			range.start as INT
+		}
+	);
+	engine.register_fn(
+		"end",
+		|range: &mut Range| -> INT {
+			range.end as INT
+		}
+	);
 	engine.register_fn(
 		"start_offset",
 		|line: &mut Line| -> INT {
@@ -1361,27 +1370,42 @@ pub fn register_primitives(engine: &mut Engine, ctx: Context) {
 			line.end_offset as INT
 		}
 	);
-	engine.register_get("row", |line: &mut Line| -> INT {
-		line.row as INT
-	});
+	engine.register_get(
+		"row",
+		|line: &mut Line| -> INT {
+			line.row as INT
+		}
+	);
 	engine.register_fn(
 		"indent",
 		|line: &mut Line| -> String {
 			line.indent.clone()
 		}
 	);
-	engine.register_fn("text", |line: &mut Line| -> String {
-		line.text.clone()
-	});
-	engine.register_fn("row", |pos: &mut Position| -> INT {
-		pos.row as INT
-	});
-	engine.register_fn("col", |pos: &mut Position| -> INT {
-		pos.col as INT
-	});
-	engine.register_fn("text", |node: &mut Arc<NodeRef>| -> String {
-		node.text()
-	});
+	engine.register_fn(
+		"text",
+		|line: &mut Line| -> String {
+			line.text.clone()
+		}
+	);
+	engine.register_fn(
+		"row",
+		|pos: &mut Position| -> INT {
+			pos.row as INT
+		}
+	);
+	engine.register_fn(
+		"col",
+		|pos: &mut Position| -> INT {
+			pos.col as INT
+		}
+	);
+	engine.register_fn(
+		"text",
+		|node: &mut Arc<NodeRef>| -> String {
+			node.text()
+		}
+	);
 	engine.register_fn(
 		"kind_id",
 		|node: &mut Arc<NodeRef>| -> INT {
@@ -1595,9 +1619,11 @@ pub fn register_primitives(engine: &mut Engine, ctx: Context) {
 		"kind",
 		|node: &mut Arc<NodeRef>, idx: INT| -> RhaiResult<INT> {
 			let idx = int_to_usize(idx, "idx")?;
-			Ok(node.child_kind_id(idx)
-				.map(|k| k as INT)
-				.unwrap_or(-1))
+			Ok(
+				node.child_kind_id(idx)
+					.map(|k| k as INT)
+					.unwrap_or(-1)
+			)
 		}
 	);
 	engine.register_fn(
@@ -1678,9 +1704,12 @@ pub fn register_primitives(engine: &mut Engine, ctx: Context) {
 			node.byte_range()
 		}
 	);
-	engine.register_fn("line", |node: &mut Arc<NodeRef>| -> Line {
-		node.line()
-	});
+	engine.register_fn(
+		"line",
+		|node: &mut Arc<NodeRef>| -> Line {
+			node.line()
+		}
+	);
 	engine.register_fn(
 		"parent",
 		|node: &mut Arc<NodeRef>| -> Dynamic {
